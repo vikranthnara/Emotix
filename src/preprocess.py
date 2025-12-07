@@ -83,7 +83,11 @@ class Preprocessor:
             # Remove punctuation for lookup (preserve original)
             word_clean = re.sub(r'[^\w]', '', word.lower())
             
+            # Only match if it's an exact key match (prevent substring matching)
+            # This prevents "am" from matching "ama" or "i'm" from matching "imo"
             if word_clean in self.slang_dict:
+                # Additional check: ensure it's not a substring match
+                # Only replace if the cleaned word exactly matches a dictionary key
                 replacement = self.slang_dict[word_clean]
                 normalized_words.append(replacement)
                 flags['slang_replacements'].append({
@@ -91,7 +95,8 @@ class Preprocessor:
                     'replacement': replacement
                 })
             elif self.slang_dict:
-                # Try fuzzy matching
+                # Try fuzzy matching, but only if word lengths are similar
+                # This prevents "am" from matching "ama" or "i'm" from matching "imo"
                 matches = get_close_matches(
                     word_clean,
                     self.slang_dict.keys(),
@@ -99,13 +104,23 @@ class Preprocessor:
                     cutoff=fuzzy_threshold
                 )
                 if matches:
-                    replacement = self.slang_dict[matches[0]]
-                    normalized_words.append(replacement)
-                    flags['fuzzy_replacements'].append({
-                        'original': word,
-                        'matched': matches[0],
-                        'replacement': replacement
-                    })
+                    matched_key = matches[0]
+                    # Only use fuzzy match if lengths are similar (within 1 character for short words, 2 for longer)
+                    # This prevents "am" (2 chars) from matching "ama" (3 chars) or "i'm" from matching "imo"
+                    length_diff = abs(len(word_clean) - len(matched_key))
+                    # For words 3 chars or less, require exact length match or difference of 1
+                    # For longer words, allow difference of 2
+                    max_diff = 1 if len(word_clean) <= 3 else 2
+                    if length_diff <= max_diff and len(word_clean) >= len(matched_key) * 0.7:
+                        replacement = self.slang_dict[matched_key]
+                        normalized_words.append(replacement)
+                        flags['fuzzy_replacements'].append({
+                            'original': word,
+                            'matched': matched_key,
+                            'replacement': replacement
+                        })
+                    else:
+                        normalized_words.append(word)
                 else:
                     normalized_words.append(word)
                     # Check if word looks like slang (short, all caps, etc.)

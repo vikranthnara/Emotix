@@ -73,3 +73,36 @@ def load_checkpoint(checkpoint_path: Path) -> pd.DataFrame:
     """
     return pd.read_parquet(checkpoint_path)
 
+
+def get_emotion_sentiment(emotion: str) -> str:
+    """
+    Get sentiment polarity for an emotion label.
+    
+    Args:
+        emotion: Emotion label (e.g., 'joy', 'sadness', 'anger')
+        
+    Returns:
+        '(positive)', '(negative)', or '(neutral)'
+    """
+    if not emotion or emotion.lower() == 'n/a':
+        return ''
+    
+    emotion_lower = emotion.lower()
+    
+    # Positive emotions
+    positive_emotions = {'joy', 'love', 'gratitude', 'excitement', 'happiness', 'optimism'}
+    if emotion_lower in positive_emotions:
+        return '(positive)'
+    
+    # Negative emotions
+    negative_emotions = {'sadness', 'anger', 'fear', 'disgust', 'anxiety', 'depression', 'stress', 'worry'}
+    if emotion_lower in negative_emotions:
+        return '(negative)'
+    
+    # Neutral
+    if emotion_lower == 'neutral':
+        return '(neutral)'
+    
+    # Default to empty if unknown
+    return ''
+

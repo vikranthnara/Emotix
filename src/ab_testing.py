@@ -62,8 +62,8 @@ class ABTester:
                     pred = self.model.predict_emotion(sequence)
                     
                     # Post-process
-                    corrected_label, corrected_intensity, overridden = self.processor.post_process(
-                        text, pred['label'], pred['intensity']
+                    corrected_label, corrected_intensity, overridden, _ = self.processor.post_process(
+                        text, pred['label'], pred['intensity'], original_text=None
                     )
                     
                     is_correct = corrected_label.lower() == expected.lower()

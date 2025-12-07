@@ -80,13 +80,17 @@ class EmotionModel:
             
             # Create pipeline for easier inference (import here to avoid torchvision issues)
             from transformers import pipeline
-            self.pipeline = pipeline(
-                "text-classification",
-                model=self.model,
-                tokenizer=self.tokenizer,
-                device=0 if device == "cuda" else -1,
-                return_all_scores=True
-            )
+            import warnings
+            # Suppress deprecation warning for return_all_scores
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*return_all_scores.*")
+                self.pipeline = pipeline(
+                    "text-classification",
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    device=0 if device == "cuda" else -1,
+                    return_all_scores=True
+                )
             
             logger.info(f"Model loaded successfully")
             
@@ -113,8 +117,8 @@ class EmotionModel:
                 extra_in_model = [l for l in model_labels_lower if l not in expected_lower]
                 
                 if missing_in_model:
-                    logger.warning(f"Expected emotions not found in model: {missing_in_model}")
-                    logger.warning(f"Model may not output these emotions, which could explain class imbalance")
+                    logger.debug(f"Expected emotions not found in model: {missing_in_model}")
+                    logger.debug(f"Model may not output these emotions, which could explain class imbalance")
                 
                 if extra_in_model:
                     logger.info(f"Model has additional labels not in expected list: {extra_in_model}")
@@ -152,16 +156,16 @@ class EmotionModel:
         ]
         
         if supported_but_not_predicted:
-            logger.warning(f"⚠️  Model Limitation: Model supports these emotions but they were never predicted:")
-            logger.warning(f"    {supported_but_not_predicted}")
-            logger.warning(f"    This suggests model bias - these emotions may need fine-tuning or a different model")
+            logger.debug(f"⚠️  Model Limitation: Model supports these emotions but they were never predicted:")
+            logger.debug(f"    {supported_but_not_predicted}")
+            logger.debug(f"    This suggests model bias - these emotions may need fine-tuning or a different model")
             
             # Check if these are rare emotions that should be predicted
             rare_emotions = ['anger', 'disgust', 'neutral']
             rare_missing = [e for e in supported_but_not_predicted if e in rare_emotions]
             if rare_missing:
-                logger.warning(f"    Rare emotions missing: {rare_missing}")
-                logger.warning(f"    Consider: fine-tuning, class weights, or alternative model")
+                logger.debug(f"    Rare emotions missing: {rare_missing}")
+                logger.debug(f"    Consider: fine-tuning, class weights, or alternative model")
     
     def get_model_labels(self) -> List[str]:
         """
@@ -649,7 +653,7 @@ def run_inference_pipeline(df: pd.DataFrame,
     emotion_analysis = model.check_emotion_support(predictions)
     if emotion_analysis['warnings']:
         for warning in emotion_analysis['warnings']:
-            logger.warning(f"Emotion distribution: {warning}")
+            logger.debug(f"Emotion distribution: {warning}")
     logger.info(f"Emotion distribution: {emotion_analysis['emotion_counts']}")
     
     # Log model limitations (emotions supported but never predicted)

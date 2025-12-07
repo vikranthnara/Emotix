@@ -391,9 +391,54 @@ class MWBPersistence:
             else:
                 intensity_str = str(intensity)
             
-            lines.append(f"[{ts_str}] {text} → {emotion} ({intensity_str})")
+            # Get sentiment indicator
+            from src.utils import get_emotion_sentiment
+            sentiment = get_emotion_sentiment(emotion)
+            sentiment_str = f" {sentiment}" if sentiment else ""
+            
+            lines.append(f"[{ts_str}] {text} → {emotion}{sentiment_str} ({intensity_str})")
         
         return "\n".join(lines)
+    
+    def clear_all_data(self) -> Dict[str, int]:
+        """
+        Clear all entries from both mwb_log and raw_archive tables.
+        
+        Returns:
+            Dictionary with counts of deleted entries
+        """
+        conn = self._get_connection()
+        
+        try:
+            cursor = conn.cursor()
+            
+            # Count before deletion
+            cursor.execute("SELECT COUNT(*) FROM mwb_log")
+            log_count_before = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM raw_archive")
+            archive_count_before = cursor.fetchone()[0]
+            
+            # Delete from mwb_log
+            cursor.execute("DELETE FROM mwb_log")
+            deleted_logs = cursor.rowcount
+            
+            # Delete from raw_archive
+            cursor.execute("DELETE FROM raw_archive")
+            deleted_archive = cursor.rowcount
+            
+            conn.commit()
+            
+            logger.info(f"Cleared {deleted_logs} mwb_log entries and {deleted_archive} raw_archive entries")
+            
+            return {
+                'deleted_logs': deleted_logs,
+                'deleted_archive': deleted_archive,
+                'total_deleted': deleted_logs + deleted_archive
+            }
+        
+        finally:
+            conn.close()
 
 
 # Note: Layer 3 (Contextualization) and Layer 4 (Modeling) functions

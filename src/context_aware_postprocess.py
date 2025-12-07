@@ -34,8 +34,9 @@ class ContextAwarePostProcessor(EmotionPostProcessor):
             Tuple of (corrected_label, corrected_intensity, was_overridden, needs_review, override_type)
         """
         # First apply standard post-processing
+        # Note: original_text not available in context-aware post-process, use normalized text
         corrected_label, corrected_intensity, was_overridden, override_type = self.post_process(
-            text, predicted_label, predicted_intensity
+            text, predicted_label, predicted_intensity, original_text=None
         )
         
         needs_review = False

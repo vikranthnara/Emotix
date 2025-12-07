@@ -56,10 +56,42 @@ class EmotionPostProcessor:
     # Positive progress patterns (should be joy/positive, not sadness)
     PROGRESS_PATTERNS = [
         r'getting\s+better',
+        r'getting\s+easier',
         r'improving',
         r'making\s+progress',
         r'feeling\s+better',
-        r'doing\s+better'
+        r'doing\s+better',
+        r'easier',
+        r'better\s+at'
+    ]
+    
+    # Growth/Learning patterns (should be joy/positive, not neutral/sadness)
+    GROWTH_PATTERNS = [
+        r'learning\s+and\s+growing',
+        r'learning',
+        r'growing',
+        r'developing',
+        r'evolving',
+        r'getting\s+better\s+at',
+        r'improving\s+at',
+        r'proud\s+of\s+(myself|myself)',
+        r'feeling\s+proud'
+    ]
+    
+    # Resilience/Determination patterns (should be joy/positive, not sadness)
+    RESILIENCE_PATTERNS = [
+        r'pushing\s+through',
+        r'hanging\s+in\s+there',
+        r'still\s+(going|trying|fighting|working)',
+        r'not\s+giving\s+up',
+        r'keeping\s+(at\s+it|going)',
+        r'persevering',
+        r'staying\s+strong',
+        r'not\s+quitting',
+        r'powering\s+through',
+        r'enduring',
+        r'sticking\s+with\s+it',
+        r'holding\s+on'
     ]
     
     # Humor patterns (should be joy, not sadness)
@@ -114,6 +146,22 @@ class EmotionPostProcessor:
         r'\bcan\'?t\s+(believe|stand)'
     ]
     
+    # Crushing patterns - positive (achievement)
+    CRUSHING_POSITIVE_PATTERNS = [
+        r'crushing\s+it',
+        r'crushing\s+(my|the|our)\s+(goals|targets|objectives|target)',
+        r'crushing\s+(this|that)',
+        r'(i|we|they)\s+(am|are)\s+crushing'
+    ]
+    
+    # Crushing patterns - negative (overwhelming)
+    CRUSHING_NEGATIVE_PATTERNS = [
+        r'crushing\s+(me|my|us|our)\s+(spirit|soul|will|hope)',
+        r'(workload|pressure|stress|weight)\s+is\s+crushing',
+        r'crushing\s+me',
+        r'crushing\s+my\s+(spirit|soul|will)'
+    ]
+    
     def __init__(self, 
                  override_confidence: float = 0.7,
                  min_confidence_for_override: float = 0.75):
@@ -141,6 +189,16 @@ class EmotionPostProcessor:
         """Check if text indicates positive progress."""
         text_lower = text.lower()
         return any(re.search(pattern, text_lower) for pattern in self.PROGRESS_PATTERNS)
+    
+    def check_resilience(self, text: str) -> bool:
+        """Check if text contains resilience/determination patterns."""
+        text_lower = text.lower()
+        return any(re.search(pattern, text_lower, re.IGNORECASE) for pattern in self.RESILIENCE_PATTERNS)
+    
+    def check_growth(self, text: str) -> bool:
+        """Check if text contains growth/learning patterns."""
+        text_lower = text.lower()
+        return any(re.search(pattern, text_lower, re.IGNORECASE) for pattern in self.GROWTH_PATTERNS)
     
     def check_humor(self, text: str) -> bool:
         """Check if text contains humor/laughter."""
@@ -172,6 +230,28 @@ class EmotionPostProcessor:
         text_lower = text.lower()
         return any(re.search(pattern, text_lower) for pattern in self.NEGATION_PATTERNS)
     
+    def check_crushing_context(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Check if text contains "crushing" and determine if it's positive or negative.
+        
+        Returns:
+            Tuple of (positive_or_negative, override_type)
+            ('positive', 'crushing_positive') or ('negative', 'crushing_negative') or (None, None)
+        """
+        text_lower = text.lower()
+        
+        # Check for positive crushing patterns first
+        for pattern in self.CRUSHING_POSITIVE_PATTERNS:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                return 'positive', 'crushing_positive'
+        
+        # Check for negative crushing patterns
+        for pattern in self.CRUSHING_NEGATIVE_PATTERNS:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                return 'negative', 'crushing_negative'
+        
+        return None, None
+    
     def check_neutral(self, text: str, intensity: float = None) -> bool:
         """Check if text is neutral (no clear emotion)."""
         text_lower = text.lower()
@@ -202,7 +282,8 @@ class EmotionPostProcessor:
                     text: str,
                     predicted_label: str,
                     predicted_intensity: float,
-                    original_probs: Optional[Dict] = None) -> Tuple[str, float, bool, Optional[str]]:
+                    original_probs: Optional[Dict] = None,
+                    original_text: Optional[str] = None) -> Tuple[str, float, bool, Optional[str]]:
         """
         Post-process emotion prediction with rule-based corrections.
         
@@ -211,19 +292,23 @@ class EmotionPostProcessor:
             predicted_label: Model's predicted emotion label
             predicted_intensity: Model's predicted intensity
             original_probs: Original probability distribution (optional)
+            original_text: Original text before normalization (optional, for keyword checking)
             
         Returns:
             Tuple of (corrected_label, corrected_intensity, was_overridden, override_type)
-            override_type: 'positive_keywords', 'gratitude', 'progress', 'humor', 'neutral', or None
+            override_type: 'positive_keywords', 'gratitude', 'progress', 'humor', 'neutral', 'crushing_positive', 'crushing_negative', or None
         """
         text_lower = text.lower()
+        # Use original text for keyword checking if available (to avoid corrupted normalized text)
+        check_text = original_text.lower() if original_text else text_lower
+        
         was_overridden = False
         corrected_label = predicted_label
         corrected_intensity = predicted_intensity
         override_type = None
         
         # Rule 1: Positive keywords → joy (override sadness/fear, but not if already joy)
-        if self.check_positive_indicators(text_lower) and predicted_label != 'joy':
+        if self.check_positive_indicators(check_text) and predicted_label != 'joy':
             if predicted_label in ['sadness', 'fear'] and predicted_intensity >= self.min_confidence_for_override:
                 corrected_label = 'joy'
                 corrected_intensity = self.override_confidence
@@ -232,25 +317,48 @@ class EmotionPostProcessor:
                 logger.info(f"Override: Positive indicators detected. {predicted_label} → joy")
         
         # Rule 2: Gratitude → joy (override sadness, but not if already joy)
-        if self.check_gratitude(text_lower) and not was_overridden and predicted_label != 'joy':
-            if predicted_label == 'sadness' and predicted_intensity >= self.min_confidence_for_override:
+        # Gratitude is a strong positive signal, so override regardless of confidence
+        if self.check_gratitude(check_text) and not was_overridden and predicted_label != 'joy':
+            if predicted_label == 'sadness':
                 corrected_label = 'joy'
                 corrected_intensity = self.override_confidence
                 was_overridden = True
                 override_type = 'gratitude'
                 logger.info(f"Override: Gratitude detected. sadness → joy")
         
-        # Rule 3: Progress → joy/positive (override sadness, but not if already joy)
-        if self.check_progress(text_lower) and not was_overridden and predicted_label != 'joy':
-            if predicted_label == 'sadness' and predicted_intensity >= self.min_confidence_for_override:
+        # Rule 2.5: Resilience → joy (override sadness, but not if already joy)
+        # Resilience is a strong positive signal, so override even with lower confidence
+        if self.check_resilience(check_text) and not was_overridden and predicted_label != 'joy':
+            if predicted_label == 'sadness':
+                # Override sadness to joy for resilience, even with lower confidence (0.5 threshold)
+                corrected_label = 'joy'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = 'resilience'
+                logger.info(f"Override: Resilience detected. sadness → joy")
+        
+        # Rule 3: Progress → joy/positive (override sadness/neutral, but not if already joy)
+        # Progress is a positive signal, override even with lower confidence
+        if self.check_progress(check_text) and not was_overridden and predicted_label != 'joy':
+            if predicted_label in ['sadness', 'neutral']:
                 corrected_label = 'joy'
                 corrected_intensity = self.override_confidence
                 was_overridden = True
                 override_type = 'progress'
-                logger.info(f"Override: Progress detected. sadness → joy")
+                logger.info(f"Override: Progress detected. {predicted_label} → joy")
+        
+        # Rule 3.5: Growth/Learning → joy (override neutral/sadness, but not if already joy)
+        # Growth and learning are positive signals
+        if self.check_growth(check_text) and not was_overridden and predicted_label != 'joy':
+            if predicted_label in ['sadness', 'neutral', 'fear']:
+                corrected_label = 'joy'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = 'growth'
+                logger.info(f"Override: Growth detected. {predicted_label} → joy")
         
         # Rule 4: Humor → joy (override sadness, but not if already joy)
-        if self.check_humor(text_lower) and not was_overridden and predicted_label != 'joy':
+        if self.check_humor(check_text) and not was_overridden and predicted_label != 'joy':
             if predicted_label == 'sadness':
                 corrected_label = 'joy'
                 corrected_intensity = self.override_confidence
@@ -258,17 +366,49 @@ class EmotionPostProcessor:
                 override_type = 'humor'
                 logger.info(f"Override: Humor detected. sadness → joy")
         
+        # Rule 0: Crushing pattern detection (before other rules)
+        if not was_overridden:
+            crushing_type, crushing_override = self.check_crushing_context(check_text)
+            if crushing_type == 'positive':
+                corrected_label = 'joy'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = crushing_override
+                logger.info(f"Override: Positive crushing detected. {predicted_label} → joy")
+            elif crushing_type == 'negative':
+                corrected_label = 'sadness'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = crushing_override
+                logger.info(f"Override: Negative crushing detected. {predicted_label} → sadness")
+        
         # Rule 5: Intensity-based override (low confidence + positive keywords → joy, but not if already joy)
+        # Also handle very low confidence (<0.3) with strong indicators
         if not was_overridden and predicted_intensity < 0.6 and predicted_label != 'joy':
-            if self.check_positive_indicators(text_lower):
+            if self.check_positive_indicators(check_text):
                 corrected_label = 'joy'
                 corrected_intensity = self.override_confidence
                 was_overridden = True
                 override_type = 'low_confidence_positive'
                 logger.info(f"Override: Low confidence positive detected. {predicted_label} → joy")
         
+        # Rule 5b: Very low confidence (<0.3) with strong emotion indicators
+        if not was_overridden and predicted_intensity < 0.3:
+            if self.check_positive_indicators(check_text):
+                corrected_label = 'joy'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = 'very_low_confidence_positive'
+                logger.info(f"Override: Very low confidence positive detected. {predicted_label} → joy")
+            elif any(keyword in check_text for keyword in self.NEGATIVE_KEYWORDS):
+                corrected_label = 'sadness'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = 'very_low_confidence_negative'
+                logger.info(f"Override: Very low confidence negative detected. {predicted_label} → sadness")
+        
         # Rule 6: Anxiety patterns (validate fear predictions)
-        if self.check_anxiety(text_lower) and not was_overridden:
+        if self.check_anxiety(check_text) and not was_overridden:
             if predicted_label == 'fear':
                 # Keep as fear, but log for validation
                 logger.debug(f"Anxiety pattern detected, keeping fear label")
@@ -280,13 +420,20 @@ class EmotionPostProcessor:
                 logger.debug(f"Depression pattern detected, keeping sadness label")
         
         # Rule 8: Neutral text → neutral (enhanced detection, but not if already neutral)
-        if self.check_neutral(text_lower, predicted_intensity) and not was_overridden and predicted_label != 'neutral':
-            # Override to neutral if detected
-            corrected_label = 'neutral'
-            corrected_intensity = min(0.3, predicted_intensity * 0.5)  # Lower confidence for neutral
-            was_overridden = True
-            override_type = 'neutral'
-            logger.info(f"Override: Neutral detected. {predicted_label} → neutral")
+        # Only override to neutral if no strong emotion indicators found
+        if self.check_neutral(check_text, predicted_intensity) and not was_overridden and predicted_label != 'neutral':
+            # Double-check: don't override to neutral if there are strong emotion keywords
+            has_strong_emotion = (
+                any(keyword in check_text for keyword in self.POSITIVE_KEYWORDS) or
+                any(keyword in check_text for keyword in self.NEGATIVE_KEYWORDS)
+            )
+            if not has_strong_emotion:
+                # Override to neutral if detected
+                corrected_label = 'neutral'
+                corrected_intensity = min(0.3, predicted_intensity * 0.5)  # Lower confidence for neutral
+                was_overridden = True
+                override_type = 'neutral'
+                logger.info(f"Override: Neutral detected. {predicted_label} → neutral")
         
         # Final validation: only mark as override if label actually changed
         # This prevents joy→joy, sadness→sadness, etc. overrides

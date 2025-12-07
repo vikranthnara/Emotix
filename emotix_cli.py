@@ -9,6 +9,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
+import warnings
 
 # Add src to path
 project_root = Path(__file__).parent
@@ -20,6 +21,7 @@ from src.modeling import EmotionModel, run_inference_pipeline
 from src.persistence import MWBPersistence
 from src.utils import setup_logging
 from src.postprocess import EmotionPostProcessor
+from src.utils import get_emotion_sentiment
 
 
 def process_single_entry(
@@ -70,15 +72,14 @@ def process_single_entry(
     df = run_inference_pipeline(df, model)
     
     # Step 4: Post-processing
-    history = persistence.fetch_history(user_id, limit=10)
-    previous_emotions = history['PrimaryEmotionLabel'].tolist() if not history.empty else []
-    
     row = df.iloc[0]
+    # Pass original text for keyword checking (to avoid issues with corrupted normalized text)
+    original_text = row.get('Text', row['NormalizedText'])
     corrected_label, corrected_intensity, was_overridden, override_type = postprocessor.post_process(
         row['NormalizedText'],
         row['PrimaryEmotionLabel'],
         row['IntensityScore_Primary'],
-        previous_emotions=previous_emotions
+        original_text=original_text
     )
     
     # Update DataFrame with post-processed results
@@ -121,9 +122,16 @@ def print_result(result: dict):
     """Print processing result."""
     print(f"\n✓ Processed: {result['text']}")
     print(f"  Normalized: {result['normalized_text']}")
-    print(f"  Emotion: {result['emotion']} (intensity: {result['intensity']:.2f})")
+    emotion = result['emotion']
+    sentiment = get_emotion_sentiment(emotion)
+    sentiment_str = f" {sentiment}" if sentiment else ""
+    print(f"  Emotion: {emotion}{sentiment_str} (intensity: {result['intensity']:.2f})")
     if result['was_overridden']:
-        print(f"  ⚡ Override: {result['original_emotion']} → {result['emotion']} (via {result['override_type']})")
+        original_emotion = result['original_emotion']
+        original_sentiment = get_emotion_sentiment(original_emotion)
+        original_sentiment_str = f" {original_sentiment}" if original_sentiment else ""
+        new_sentiment_str = f" {sentiment}" if sentiment else ""
+        print(f"  ⚡ Override: {original_emotion}{original_sentiment_str} → {emotion}{new_sentiment_str} (via {result['override_type']})")
 
 
 def interactive_loop(
@@ -133,6 +141,10 @@ def interactive_loop(
     model_name: str = "j-hartmann/emotion-english-distilroberta-base"
 ):
     """Main interactive loop."""
+    # Suppress warnings for cleaner output
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", message=".*return_all_scores.*")
+    
     # Initialize components
     print(f"\nInitializing pipeline components...")
     persistence = MWBPersistence(db_path)
@@ -175,10 +187,12 @@ def interactive_loop(
                         print(f"\n📝 History ({len(history)} entries):")
                         for _, row in history.tail(10).iterrows():
                             emotion = row.get('PrimaryEmotionLabel', 'N/A')
+                            sentiment = get_emotion_sentiment(emotion)
+                            sentiment_str = f" {sentiment}" if sentiment else ""
                             intensity = row.get('IntensityScore_Primary', 'N/A')
                             text = row.get('NormalizedText', 'N/A')[:50]
                             timestamp = row.get('Timestamp', 'N/A')
-                            print(f"  [{timestamp}] {text} → {emotion} ({intensity:.2f if isinstance(intensity, (int, float)) else intensity})")
+                            print(f"  [{timestamp}] {text} → {emotion}{sentiment_str} ({intensity:.2f if isinstance(intensity, (int, float)) else intensity})")
                         print()
                     continue
                 

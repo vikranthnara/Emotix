@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 
 from src.pipeline import run_full_pipeline
 from src.persistence import MWBPersistence
-from src.utils import setup_logging
+from src.utils import setup_logging, get_emotion_sentiment
 
 def print_section(title: str, char: str = "="):
     """Print a formatted section header."""
@@ -69,10 +69,14 @@ def analyze_results(df: pd.DataFrame):
                 override_type = row.get('PostProcessingOverride', 'N/A')
                 text = row.get('NormalizedText', 'N/A')[:50]
                 print(f"    '{text}...'")
+                original_sentiment = get_emotion_sentiment(original)
+                current_sentiment = get_emotion_sentiment(current)
+                original_sentiment_str = f" {original_sentiment}" if original_sentiment else ""
+                current_sentiment_str = f" {current_sentiment}" if current_sentiment else ""
                 if original == current:
-                    print(f"      Original: {original} → Current: {current} (via {override_type}, no change)")
+                    print(f"      Original: {original}{original_sentiment_str} → Current: {current}{current_sentiment_str} (via {override_type}, no change)")
                 else:
-                    print(f"      Original: {original} → Current: {current} (via {override_type})")
+                    print(f"      Original: {original}{original_sentiment_str} → Current: {current}{current_sentiment_str} (via {override_type})")
     else:
         print("  No post-processing overrides found")
     
@@ -92,8 +96,10 @@ def analyze_results(df: pd.DataFrame):
             for idx, row in flagged_samples.head(3).iterrows():
                 text = row.get('NormalizedText', 'N/A')[:60]
                 emotion = row.get('PrimaryEmotionLabel', 'N/A')
+                sentiment = get_emotion_sentiment(emotion)
+                sentiment_str = f" {sentiment}" if sentiment else ""
                 intensity = row.get('IntensityScore_Primary', 'N/A')
-                print(f"    - '{text}...' → {emotion} ({intensity:.2f})")
+                print(f"    - '{text}...' → {emotion}{sentiment_str} ({intensity:.2f})")
         else:
             print("  ✓ No predictions flagged for review")
     else:
@@ -108,8 +114,10 @@ def show_sample_predictions(df: pd.DataFrame, n: int = 5):
         print(f"      Text: {row.get('NormalizedText', 'N/A')}")
         if 'PrimaryEmotionLabel' in row:
             emotion = row.get('PrimaryEmotionLabel', 'N/A')
+            sentiment = get_emotion_sentiment(emotion)
+            sentiment_str = f" {sentiment}" if sentiment else ""
             intensity = row.get('IntensityScore_Primary', 'N/A')
-            print(f"      Emotion: {emotion} (intensity: {intensity:.3f})")
+            print(f"      Emotion: {emotion}{sentiment_str} (intensity: {intensity:.3f})")
         if 'PostProcessingOverride' in row and pd.notna(row['PostProcessingOverride']):
             print(f"      ⚡ Override: {row['PostProcessingOverride']}")
         if 'AmbiguityFlag' in row and row.get('AmbiguityFlag', False):
@@ -135,9 +143,11 @@ def test_history_retrieval(persistence: MWBPersistence, user_ids: list):
             recent = history.tail(3)
             for _, row in recent.iterrows():
                 emotion = row.get('PrimaryEmotionLabel', 'N/A')
+                sentiment = get_emotion_sentiment(emotion)
+                sentiment_str = f" {sentiment}" if sentiment else ""
                 intensity = row.get('IntensityScore_Primary', 'N/A')
                 timestamp = row.get('Timestamp', 'N/A')
-                print(f"    {timestamp} → {emotion} ({intensity:.3f})")
+                print(f"    {timestamp} → {emotion}{sentiment_str} ({intensity:.3f})")
 
 def main():
     """Run end-to-end pipeline test."""
