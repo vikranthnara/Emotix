@@ -660,8 +660,12 @@ def run_inference_pipeline(df: pd.DataFrame,
     df['IntensityScore_Primary'] = [p['intensity'] for p in predictions]
     
     # Store original model predictions before post-processing
+    # Ensure these are always set (fill None with empty string for labels)
     df['OriginalEmotionLabel'] = df['PrimaryEmotionLabel'].copy()
     df['OriginalIntensityScore'] = df['IntensityScore_Primary'].copy()
+    
+    # Ensure OriginalEmotionLabel is never None (fill with PrimaryEmotionLabel if needed)
+    df['OriginalEmotionLabel'] = df['OriginalEmotionLabel'].fillna(df['PrimaryEmotionLabel'])
     
     # Flag high-confidence predictions (intensity >0.95)
     df['HighConfidenceFlag'] = df['IntensityScore_Primary'] > 0.95

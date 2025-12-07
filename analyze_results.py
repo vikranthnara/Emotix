@@ -4,7 +4,9 @@ Comprehensive analysis of pipeline results from the database.
 """
 
 import sys
+import argparse
 from pathlib import Path
+from datetime import datetime, timedelta
 import pandas as pd
 import sqlite3
 from collections import Counter
@@ -104,7 +106,24 @@ def analyze_post_processing(df: pd.DataFrame):
         print("     (Overrides are applied during inference but not stored)")
         return
     
-    overrides = df[df['PostProcessingOverride'].notna()]
+    # Only count actual overrides where label changed (PostProcessingOverride is not None)
+    # and verify that original != current to ensure it's a real override
+    overrides = df[df['PostProcessingOverride'].notna()].copy()
+    
+    # Filter to only include records where label actually changed
+    if 'OriginalEmotionLabel' in overrides.columns and 'PrimaryEmotionLabel' in overrides.columns:
+        # Fill None OriginalEmotionLabel with PrimaryEmotionLabel for comparison
+        overrides['OriginalEmotionLabel'] = overrides['OriginalEmotionLabel'].fillna(overrides['PrimaryEmotionLabel'])
+        # Only count as override if original != current
+        overrides = overrides[overrides['OriginalEmotionLabel'] != overrides['PrimaryEmotionLabel']]
+        # Also filter out where both are None or empty
+        overrides = overrides[
+            (overrides['OriginalEmotionLabel'].notna()) & 
+            (overrides['PrimaryEmotionLabel'].notna()) &
+            (overrides['OriginalEmotionLabel'] != '') &
+            (overrides['PrimaryEmotionLabel'] != '')
+        ]
+    
     total = len(df)
     override_count = len(overrides)
     
@@ -316,35 +335,67 @@ def analyze_text_quality(df: pd.DataFrame):
 
 def main():
     """Load and analyze results from database."""
+    parser = argparse.ArgumentParser(description='Analyze Emotix pipeline results')
+    parser.add_argument('--since', type=str, help='Only analyze records since this date (YYYY-MM-DD or days ago, e.g., "7" for last 7 days)')
+    parser.add_argument('--db', type=str, help='Path to database file (default: data/mwb_log.db)')
+    args = parser.parse_args()
+    
     print_section("🧠 Emotix Pipeline Results Analysis")
     
     db_path = project_root / "data" / "mwb_log.db"
+    if args.db:
+        db_path = Path(args.db)
     
     if not db_path.exists():
         print(f"\n❌ Database not found: {db_path}")
         return 1
+    
+    # Parse date filter
+    date_filter = None
+    if args.since:
+        try:
+            # Try parsing as days ago
+            days_ago = int(args.since)
+            date_filter = (datetime.now() - timedelta(days=days_ago)).strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n📅 Filtering records since {days_ago} days ago ({date_filter})")
+        except ValueError:
+            # Try parsing as date string
+            try:
+                date_filter = datetime.strptime(args.since, '%Y-%m-%d').strftime('%Y-%m-%d %H:%M:%S')
+                print(f"\n📅 Filtering records since {args.since}")
+            except ValueError:
+                print(f"\n⚠️  Invalid date format: {args.since}. Use YYYY-MM-DD or number of days.")
+                return 1
     
     # Load all results from database
     persistence = MWBPersistence(db_path)
     
     # Query all records (only columns that exist in schema)
     conn = sqlite3.connect(db_path)
+    
+    # Build query with optional date filter
+    base_query = """
+        SELECT 
+            LogID, UserID, Timestamp, NormalizedText,
+            PrimaryEmotionLabel, IntensityScore_Primary,
+            OriginalEmotionLabel, OriginalIntensityScore,
+            AmbiguityFlag, NormalizationFlags,
+            PostProcessingOverride, FlagForReview,
+            PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag
+        FROM mwb_log
+    """
+    
+    if date_filter:
+        base_query += f" WHERE Timestamp >= '{date_filter}'"
+    
+    base_query += " ORDER BY Timestamp"
+    
     # Try to get all columns, including new ones
     try:
-        df = pd.read_sql_query("""
-            SELECT 
-                LogID, UserID, Timestamp, NormalizedText,
-                PrimaryEmotionLabel, IntensityScore_Primary,
-                OriginalEmotionLabel, OriginalIntensityScore,
-                AmbiguityFlag, NormalizationFlags,
-                PostProcessingOverride, FlagForReview,
-                PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag
-            FROM mwb_log
-            ORDER BY Timestamp
-        """, conn)
+        df = pd.read_sql_query(base_query, conn)
     except:
         # Fallback if new columns don't exist yet
-        df = pd.read_sql_query("""
+        fallback_query = """
             SELECT 
                 LogID, UserID, Timestamp, NormalizedText,
                 PrimaryEmotionLabel, IntensityScore_Primary,
@@ -352,20 +403,49 @@ def main():
                 AmbiguityFlag, NormalizationFlags,
                 PostProcessingOverride, FlagForReview
             FROM mwb_log
-            ORDER BY Timestamp
-        """, conn)
+        """
+        if date_filter:
+            fallback_query += f" WHERE Timestamp >= '{date_filter}'"
+        fallback_query += " ORDER BY Timestamp"
+        df = pd.read_sql_query(fallback_query, conn)
     conn.close()
+    
+    # Convert flag columns to bool (they're stored as integers in SQLite)
+    if 'PostProcessingReviewFlag' in df.columns:
+        df['PostProcessingReviewFlag'] = df['PostProcessingReviewFlag'].astype(bool)
+    if 'AnomalyDetectionFlag' in df.columns:
+        df['AnomalyDetectionFlag'] = df['AnomalyDetectionFlag'].astype(bool)
+    if 'HighConfidenceFlag' in df.columns:
+        df['HighConfidenceFlag'] = df['HighConfidenceFlag'].astype(bool)
+    if 'FlagForReview' in df.columns:
+        df['FlagForReview'] = df['FlagForReview'].astype(bool)
+    if 'AmbiguityFlag' in df.columns:
+        df['AmbiguityFlag'] = df['AmbiguityFlag'].astype(bool)
     
     # Convert types
     if 'Timestamp' in df.columns:
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-    if 'AmbiguityFlag' in df.columns:
-        df['AmbiguityFlag'] = df['AmbiguityFlag'].astype(bool)
-    if 'FlagForReview' in df.columns:
-        df['FlagForReview'] = df['FlagForReview'].astype(bool)
+    
+    # Detect old records (missing new columns or None OriginalEmotionLabel)
+    old_records = 0
+    if len(df) > 0:
+        # Count records missing flag sources (old records)
+        if 'PostProcessingReviewFlag' in df.columns:
+            old_records = (~df['PostProcessingReviewFlag'] & ~df['AnomalyDetectionFlag'] & 
+                          ~df['HighConfidenceFlag'] & df['FlagForReview']).sum()
+        # Count records with None OriginalEmotionLabel
+        if 'OriginalEmotionLabel' in df.columns:
+            none_original = df['OriginalEmotionLabel'].isna().sum()
+            if none_original > 0:
+                old_records = max(old_records, none_original)
     
     print(f"\n✓ Loaded {len(df)} records from database")
     print(f"✓ Columns: {', '.join(df.columns)}")
+    
+    if old_records > 0 and not date_filter:
+        print(f"\n⚠️  Warning: {old_records} records appear to be from before recent fixes")
+        print(f"   (missing flag sources or OriginalEmotionLabel). Use --since to filter recent records.")
+        print(f"   Example: python analyze_results.py --since 7  # Last 7 days")
     
     # Run all analyses
     analyze_emotion_distribution(df)

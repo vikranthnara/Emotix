@@ -88,8 +88,11 @@ class ContextAwarePostProcessor(EmotionPostProcessor):
                         logger.info(f"High confidence positive on negative context. Flagging for review.")
         
         # Also check standard review flags (inherited from EmotionPostProcessor)
+        # Pass high_confidence_flag correctly to respect intensity threshold exception
+        # Check if intensity >= 0.95 to determine high_confidence_flag
         if not needs_review:
-            needs_review = self.flag_for_review(text, predicted_label, predicted_intensity, high_confidence_flag=False)
+            high_conf_flag = predicted_intensity >= 0.95
+            needs_review = self.flag_for_review(text, predicted_label, predicted_intensity, high_confidence_flag=high_conf_flag)
         
         return corrected_label, corrected_intensity, was_overridden, needs_review, override_type
 
