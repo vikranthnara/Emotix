@@ -160,4 +160,71 @@ class TestPersistence:
             conn.close()
         finally:
             Path(temp_path).unlink()
+    
+    def test_get_last_3_summary(self):
+        """Test get_last_3_summary() function."""
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            temp_path = f.name
+        
+        try:
+            persistence = MWBPersistence(temp_path)
+            
+            # Test with no entries
+            summary = persistence.get_last_3_summary('user1')
+            assert summary == "No entries found."
+            
+            # Write test data
+            df = pd.DataFrame({
+                'UserID': ['user1', 'user1', 'user1', 'user1'],
+                'Timestamp': [
+                    datetime(2024, 1, 1, 10, 0),
+                    datetime(2024, 1, 1, 11, 0),
+                    datetime(2024, 1, 1, 12, 0),
+                    datetime(2024, 1, 1, 13, 0)
+                ],
+                'NormalizedText': ['first entry', 'second entry', 'third entry', 'fourth entry'],
+                'NormalizationFlags': [{}, {}, {}, {}],
+                'PrimaryEmotionLabel': ['joy', 'sadness', 'anger', 'fear'],
+                'IntensityScore_Primary': [0.8, 0.9, 0.7, 0.85]
+            })
+            persistence.write_results(df, archive_raw=False)
+            
+            # Test summary returns last 3 entries
+            summary = persistence.get_last_3_summary('user1')
+            assert 'second entry' in summary
+            assert 'third entry' in summary
+            assert 'fourth entry' in summary
+            assert 'first entry' not in summary  # Should only show last 3
+            
+            # Verify format
+            lines = summary.split('\n')
+            assert len(lines) == 3
+            assert '→' in lines[0]  # Should have arrow separator
+            assert 'joy' in summary or 'sadness' in summary or 'anger' in summary or 'fear' in summary
+            
+            # Test with exactly 2 entries
+            persistence2 = MWBPersistence(temp_path + '2')
+            try:
+                df2 = pd.DataFrame({
+                    'UserID': ['user2', 'user2'],
+                    'Timestamp': [
+                        datetime(2024, 1, 1, 10, 0),
+                        datetime(2024, 1, 1, 11, 0)
+                    ],
+                    'NormalizedText': ['entry one', 'entry two'],
+                    'NormalizationFlags': [{}, {}],
+                    'PrimaryEmotionLabel': ['joy', 'sadness'],
+                    'IntensityScore_Primary': [0.8, 0.9]
+                })
+                persistence2.write_results(df2, archive_raw=False)
+                
+                summary2 = persistence2.get_last_3_summary('user2')
+                assert 'entry one' in summary2
+                assert 'entry two' in summary2
+                lines2 = summary2.split('\n')
+                assert len(lines2) == 2
+            finally:
+                Path(temp_path + '2').unlink()
+        finally:
+            Path(temp_path).unlink()
 

@@ -347,6 +347,53 @@ class MWBPersistence:
         
         finally:
             conn.close()
+    
+    def get_last_3_summary(self, user_id: str) -> str:
+        """
+        Return a formatted summary of the last 3 entries with their tags.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Formatted string with last 3 entries, one per line.
+            Format: "[Timestamp] Text → Emotion (Intensity)"
+            Returns "No entries found." if user has no history.
+        """
+        # Fetch more entries than needed, then take the last 3 (most recent)
+        history = self.fetch_history(user_id, limit=10)
+        
+        if history.empty:
+            return "No entries found."
+        
+        # Get last 3 entries (most recent) - history is ordered ASC, so tail(3) gets most recent
+        last_3 = history.tail(3)
+        
+        lines = []
+        for _, row in last_3.iterrows():
+            timestamp = row['Timestamp']
+            text = row['NormalizedText']
+            # Truncate text if too long (keep first 60 chars)
+            if len(text) > 60:
+                text = text[:57] + "..."
+            emotion = row.get('PrimaryEmotionLabel', 'N/A')
+            intensity = row.get('IntensityScore_Primary', 0.0)
+            
+            # Format timestamp nicely
+            if isinstance(timestamp, pd.Timestamp):
+                ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                ts_str = str(timestamp)
+            
+            # Format intensity to 2 decimal places
+            if isinstance(intensity, (int, float)):
+                intensity_str = f"{intensity:.2f}"
+            else:
+                intensity_str = str(intensity)
+            
+            lines.append(f"[{ts_str}] {text} → {emotion} ({intensity_str})")
+        
+        return "\n".join(lines)
 
 
 # Note: Layer 3 (Contextualization) and Layer 4 (Modeling) functions

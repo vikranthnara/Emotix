@@ -56,3 +56,8 @@ Thumbs.db
 data/mwb_log.db
 checkpoints/
 
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/
+*.cover

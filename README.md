@@ -110,6 +110,63 @@ With coverage:
 pytest tests/ --cov=src --cov-report=html
 ```
 
+### Interactive CLI (Streaming Input)
+
+**Run the interactive CLI:**
+```bash
+python emotix_cli.py
+```
+
+The CLI will prompt for a User ID, then accept text entries one by one. Each entry is processed through the full 5-layer pipeline and the emotion prediction is displayed along with a summary of the last 3 entries.
+
+**Commands:**
+- Type any text and press Enter to process it
+- `summary` - Show summary of last 3 entries
+- `history` - Show full history (last 10 entries)
+- `help` - Show help message
+- `exit` or `quit` - Exit the program
+
+**Command-line options:**
+```bash
+# Specify user ID (skip prompt)
+python emotix_cli.py --user user001
+
+# Custom database and slang dictionary
+python emotix_cli.py --user user001 --db data/custom.db --slang-dict data/custom_slang.json
+
+# Custom model
+python emotix_cli.py --user user001 --model j-hartmann/emotion-english-distilroberta-base
+
+# Adjust logging level
+python emotix_cli.py --user user001 --log-level INFO
+```
+
+**Example session:**
+```
+[user001] > I am crushing it at work today!
+✓ Processed: I am crushing it at work today!
+  Normalized: I am crushing it at work today!
+  Emotion: joy (intensity: 0.85)
+
+📊 Last 3 Entries:
+[2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
+
+[user001] > The workload is crushing me
+✓ Processed: The workload is crushing me
+  Normalized: The workload is crushing me
+  Emotion: sadness (intensity: 0.78)
+
+📊 Last 3 Entries:
+[2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
+[2024-01-15 10:35:00] The workload is crushing me → sadness (0.78)
+
+[user001] > summary
+📊 Last 3 Entries Summary:
+[2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
+[2024-01-15 10:35:00] The workload is crushing me → sadness (0.78)
+[2024-01-15 10:40:00] Feeling better now → joy (0.72)
+```
+
 ### Programmatic Usage
 
 **Complete Pipeline (Recommended):**
@@ -219,6 +276,31 @@ normalized, flags = preprocessor.preprocess_text("lol that's great 😊")
 **APIs:**
 - `write_results(df, archive_raw=True, batch_size=100)` - Transaction-safe batch writes
 - `fetch_history(user_id, since_timestamp=None, limit=None)` - Fast indexed retrieval (<100ms)
+- `get_last_3_summary(user_id)` - Returns formatted summary string of last 3 entries with tags
+- `get_user_stats(user_id)` - Returns user statistics (total logs, first/last log, avg intensity)
+
+**Usage:**
+```python
+from src.persistence import MWBPersistence
+
+persistence = MWBPersistence("data/mwb_log.db")
+
+# Get formatted summary of last 3 entries
+summary = persistence.get_last_3_summary("user001")
+print(summary)
+# Output:
+# [2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
+# [2024-01-15 10:35:00] The workload is crushing me → sadness (0.78)
+# [2024-01-15 10:40:00] Feeling better now → joy (0.72)
+
+# Get full history
+history = persistence.fetch_history("user001", limit=10)
+
+# Get user statistics
+stats = persistence.get_user_stats("user001")
+print(f"Total logs: {stats['total_logs']}")
+print(f"Average intensity: {stats['avg_intensity']:.2f}")
+```
 
 **Indexing:**
 - Composite index on `(UserID, Timestamp)` for fast history queries
