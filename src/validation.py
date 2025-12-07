@@ -228,6 +228,223 @@ class MetricsTracker:
         with open(filepath, 'r') as f:
             self.metrics_history = json.load(f)
         logger.info(f"Loaded metrics from {filepath}")
+    
+    def track_override_effectiveness(self,
+                                    df: pd.DataFrame,
+                                    true_labels_col: Optional[str] = None) -> Dict:
+        """
+        Track effectiveness of post-processing overrides.
+        
+        Args:
+            df: DataFrame with predictions, overrides, and optionally true labels
+            true_labels_col: Column name for true labels (if available)
+            
+        Returns:
+            Dictionary with override effectiveness metrics
+        """
+        if 'PostProcessingOverride' not in df.columns or 'WasOverridden' not in df.columns:
+            logger.warning("Override columns not found in DataFrame")
+            return {}
+        
+        overrides = df[df['WasOverridden'] == True]
+        total_overrides = len(overrides)
+        
+        if total_overrides == 0:
+            return {
+                'total_overrides': 0,
+                'override_rate': 0.0,
+                'override_types': {},
+                'precision': None,
+                'recall': None
+            }
+        
+        # Override type distribution
+        override_types = overrides['PostProcessingOverride'].value_counts().to_dict()
+        
+        metrics = {
+            'total_overrides': total_overrides,
+            'override_rate': total_overrides / len(df),
+            'override_types': override_types
+        }
+        
+        # If true labels available, compute precision/recall
+        if true_labels_col and true_labels_col in df.columns:
+            # Precision: of all overrides, how many were correct?
+            correct_overrides = 0
+            for idx, row in overrides.iterrows():
+                predicted = row.get('PrimaryEmotionLabel', '')
+                true_label = row.get(true_labels_col, '')
+                if predicted == true_label:
+                    correct_overrides += 1
+            
+            precision = correct_overrides / total_overrides if total_overrides > 0 else 0.0
+            
+            # Recall: of all misclassifications, how many were caught by overrides?
+            # This requires knowing which predictions were wrong
+            misclassifications = df[df['PrimaryEmotionLabel'] != df[true_labels_col]]
+            caught_by_override = len(misclassifications[misclassifications['WasOverridden'] == True])
+            recall = caught_by_override / len(misclassifications) if len(misclassifications) > 0 else 0.0
+            
+            metrics['precision'] = precision
+            metrics['recall'] = recall
+            metrics['correct_overrides'] = correct_overrides
+            metrics['caught_misclassifications'] = caught_by_override
+        
+        return metrics
+    
+    def track_emotion_distribution(self, df: pd.DataFrame) -> Dict:
+        """
+        Track emotion distribution over time.
+        
+        Args:
+            df: DataFrame with emotion predictions and timestamps
+            
+        Returns:
+            Dictionary with emotion distribution metrics
+        """
+        if 'PrimaryEmotionLabel' not in df.columns:
+            logger.warning("PrimaryEmotionLabel column not found")
+            return {}
+        
+        emotion_counts = df['PrimaryEmotionLabel'].value_counts().to_dict()
+        total = len(df)
+        emotion_percentages = {emotion: (count / total) * 100 for emotion, count in emotion_counts.items()}
+        
+        # Temporal distribution if timestamp available
+        temporal_dist = {}
+        if 'Timestamp' in df.columns:
+            df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+            df = df.dropna(subset=['Timestamp'])
+            if len(df) > 0:
+                df = df.sort_values('Timestamp')
+                # Group by date
+                df['Date'] = df['Timestamp'].dt.date
+                daily_dist = df.groupby('Date')['PrimaryEmotionLabel'].value_counts().unstack(fill_value=0)
+                temporal_dist = daily_dist.to_dict()
+        
+        return {
+            'emotion_counts': emotion_counts,
+            'emotion_percentages': emotion_percentages,
+            'total_predictions': total,
+            'temporal_distribution': temporal_dist
+        }
+    
+    def track_calibration_quality(self,
+                                  df: pd.DataFrame,
+                                  true_labels_col: Optional[str] = None,
+                                  intensity_col: str = 'IntensityScore_Primary') -> Dict:
+        """
+        Track calibration quality using Expected Calibration Error (ECE).
+        
+        Args:
+            df: DataFrame with predictions and intensities
+            true_labels_col: Column name for true labels (if available)
+            intensity_col: Column name for intensity scores
+            
+        Returns:
+            Dictionary with calibration metrics
+        """
+        if intensity_col not in df.columns:
+            logger.warning(f"Intensity column {intensity_col} not found")
+            return {}
+        
+        intensities = df[intensity_col]
+        
+        metrics = {
+            'mean_intensity': float(intensities.mean()),
+            'median_intensity': float(intensities.median()),
+            'std_intensity': float(intensities.std()),
+            'high_confidence_rate': float((intensities >= 0.95).sum() / len(df)),
+            'medium_confidence_rate': float(((intensities >= 0.5) & (intensities < 0.95)).sum() / len(df)),
+            'low_confidence_rate': float((intensities < 0.5).sum() / len(df))
+        }
+        
+        # Compute ECE if true labels available
+        if true_labels_col and true_labels_col in df.columns:
+            try:
+                ece = self._compute_ece(df, true_labels_col, intensity_col)
+                metrics['expected_calibration_error'] = ece
+            except Exception as e:
+                logger.warning(f"Could not compute ECE: {e}")
+        
+        # Intensity distribution by emotion
+        if 'PrimaryEmotionLabel' in df.columns:
+            intensity_by_emotion = df.groupby('PrimaryEmotionLabel')[intensity_col].agg(['mean', 'std', 'count']).to_dict('index')
+            metrics['intensity_by_emotion'] = intensity_by_emotion
+        
+        return metrics
+    
+    def _compute_ece(self, df: pd.DataFrame, true_col: str, intensity_col: str, n_bins: int = 10) -> float:
+        """
+        Compute Expected Calibration Error (ECE).
+        
+        ECE = sum(|accuracy(bin) - confidence(bin)| * proportion(bin))
+        """
+        df = df.copy()
+        df['Correct'] = (df['PrimaryEmotionLabel'] == df[true_col]).astype(int)
+        
+        # Bin predictions by confidence
+        df['Bin'] = pd.cut(df[intensity_col], bins=n_bins, labels=False)
+        
+        ece = 0.0
+        for bin_idx in range(n_bins):
+            bin_data = df[df['Bin'] == bin_idx]
+            if len(bin_data) == 0:
+                continue
+            
+            accuracy = bin_data['Correct'].mean()
+            confidence = bin_data[intensity_col].mean()
+            proportion = len(bin_data) / len(df)
+            
+            ece += abs(accuracy - confidence) * proportion
+        
+        return float(ece)
+    
+    def track_false_positive_rate(self,
+                                 df: pd.DataFrame,
+                                 true_labels_col: str,
+                                 emotion: str) -> Dict:
+        """
+        Track false positive rate for a specific emotion.
+        
+        Args:
+            df: DataFrame with predictions and true labels
+            true_labels_col: Column name for true labels
+            emotion: Emotion label to check
+            
+        Returns:
+            Dictionary with false positive metrics
+        """
+        if 'PrimaryEmotionLabel' not in df.columns or true_labels_col not in df.columns:
+            logger.warning("Required columns not found")
+            return {}
+        
+        # True positives: predicted emotion AND true emotion
+        tp = len(df[(df['PrimaryEmotionLabel'] == emotion) & (df[true_labels_col] == emotion)])
+        
+        # False positives: predicted emotion BUT not true emotion
+        fp = len(df[(df['PrimaryEmotionLabel'] == emotion) & (df[true_labels_col] != emotion)])
+        
+        # True negatives: not predicted emotion AND not true emotion
+        tn = len(df[(df['PrimaryEmotionLabel'] != emotion) & (df[true_labels_col] != emotion)])
+        
+        # False negatives: not predicted emotion BUT true emotion
+        fn = len(df[(df['PrimaryEmotionLabel'] != emotion) & (df[true_labels_col] == emotion)])
+        
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+        fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+        
+        return {
+            'emotion': emotion,
+            'true_positives': tp,
+            'false_positives': fp,
+            'true_negatives': tn,
+            'false_negatives': fn,
+            'false_positive_rate': float(fpr),
+            'false_negative_rate': float(fnr),
+            'precision': float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0,
+            'recall': float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+        }
 
 
 def validate_on_ambiguous_dataset(model,

@@ -14,6 +14,7 @@ from src.modeling import EmotionModel, run_inference_pipeline
 from src.persistence import MWBPersistence
 from src.utils import setup_logging, checkpoint_dataframe
 from src.context_strategies import RecentContextStrategy
+from src.anomaly_detection import UserPatternAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,8 @@ def run_full_pipeline(
     max_context_turns: int = 5,
     batch_size: int = 32,
     checkpoint_dir: Optional[Union[str, Path]] = None,
-    archive_raw: bool = True
+    archive_raw: bool = True,
+    temperature: float = 1.5
 ) -> pd.DataFrame:
     """
     Run complete Phase 2 pipeline end-to-end.
@@ -40,6 +42,9 @@ def run_full_pipeline(
         batch_size: Batch size for model inference
         checkpoint_dir: Directory for checkpoints (optional)
         archive_raw: Whether to archive raw text
+        temperature: Temperature scaling for confidence calibration (default: 1.5)
+                    Higher values (>1.0) reduce confidence, lower values (<1.0) increase confidence
+                    Increased from 1.3 to 1.5 to further reduce overconfidence
         
     Returns:
         Final DataFrame with all predictions
@@ -87,7 +92,7 @@ def run_full_pipeline(
     
     # Step 4: Modeling
     logger.info("[4/5] Modeling...")
-    model = EmotionModel(model_name=model_name)
+    model = EmotionModel(model_name=model_name, temperature=temperature)  # Calibrate confidence
     df = run_inference_pipeline(
         df,
         model,
@@ -100,8 +105,69 @@ def run_full_pipeline(
     if checkpoint_dir:
         checkpoint_dataframe(df, checkpoint_dir, "modeling")
     
+    # Step 4.5: Anomaly Detection (before persistence)
+    logger.info("[4.5/5] Anomaly Detection...")
+    analyzer = UserPatternAnalyzer()
+    user_analysis = analyzer.analyze_all_users(df)
+    flagged_users = analyzer.flag_high_risk_users(df)
+    
+    # Store anomaly detection flag separately
+    if len(flagged_users) > 0:
+        logger.warning(f"Flagged {len(flagged_users)} users for review: {flagged_users}")
+        df['AnomalyDetectionFlag'] = df['UserID'].isin(flagged_users)
+    else:
+        df['AnomalyDetectionFlag'] = False
+    
+    # Combine all flag sources into FlagForReview
+    # Post-processing review flag (if exists)
+    post_processing_flag = df.get('PostProcessingReviewFlag', pd.Series([False] * len(df)))
+    if isinstance(post_processing_flag, pd.Series):
+        post_processing_flag = post_processing_flag.fillna(False).astype(bool)
+    else:
+        post_processing_flag = pd.Series([False] * len(df))
+    
+    # Anomaly detection flag
+    anomaly_flag = df.get('AnomalyDetectionFlag', pd.Series([False] * len(df)))
+    if isinstance(anomaly_flag, pd.Series):
+        anomaly_flag = anomaly_flag.fillna(False).astype(bool)
+    else:
+        anomaly_flag = pd.Series([False] * len(df))
+    
+    # High confidence flag (if exists)
+    high_conf_flag = df.get('HighConfidenceFlag', pd.Series([False] * len(df)))
+    if isinstance(high_conf_flag, pd.Series):
+        high_conf_flag = high_conf_flag.fillna(False).astype(bool)
+    else:
+        high_conf_flag = pd.Series([False] * len(df))
+    
+    # Combine: flag if any source flags it
+    df['FlagForReview'] = post_processing_flag | anomaly_flag | high_conf_flag
+    
     # Step 5: Persistence
     logger.info("[5/5] Persistence...")
+    
+    # Verify flag columns exist and log counts before persistence
+    post_processing_count = df.get('PostProcessingReviewFlag', pd.Series([0] * len(df))).sum() if 'PostProcessingReviewFlag' in df.columns else 0
+    anomaly_count = df.get('AnomalyDetectionFlag', pd.Series([0] * len(df))).sum() if 'AnomalyDetectionFlag' in df.columns else 0
+    high_conf_count = df.get('HighConfidenceFlag', pd.Series([0] * len(df))).sum() if 'HighConfidenceFlag' in df.columns else 0
+    total_flag_count = df.get('FlagForReview', pd.Series([0] * len(df))).sum() if 'FlagForReview' in df.columns else 0
+    
+    logger.info(f"Flag counts before persistence: PostProcessing={post_processing_count}, Anomaly={anomaly_count}, HighConf={high_conf_count}, Total={total_flag_count}")
+    
+    # Ensure all flag columns are present (set to False if missing)
+    if 'PostProcessingReviewFlag' not in df.columns:
+        df['PostProcessingReviewFlag'] = False
+        logger.warning("PostProcessingReviewFlag column missing, setting to False")
+    if 'AnomalyDetectionFlag' not in df.columns:
+        df['AnomalyDetectionFlag'] = False
+        logger.warning("AnomalyDetectionFlag column missing, setting to False")
+    if 'HighConfidenceFlag' not in df.columns:
+        df['HighConfidenceFlag'] = False
+        logger.warning("HighConfidenceFlag column missing, setting to False")
+    if 'FlagForReview' not in df.columns:
+        df['FlagForReview'] = False
+        logger.warning("FlagForReview column missing, setting to False")
+    
     rows_written = persistence.write_results(df, archive_raw=archive_raw)
     logger.info(f"Pipeline complete. Wrote {rows_written} rows to database.")
     

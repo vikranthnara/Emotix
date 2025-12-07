@@ -121,7 +121,8 @@ df_results = run_full_pipeline(
     input_path="data/sample_data.csv",
     db_path="data/mwb_log.db",
     slang_dict_path="data/slang_dictionary.json",
-    model_name="j-hartmann/emotion-english-distilroberta-base"
+    model_name="j-hartmann/emotion-english-distilroberta-base",
+    temperature=1.3  # Confidence calibration (default: 1.3)
 )
 ```
 
@@ -254,11 +255,26 @@ sequence = create_sequence_for_model("I'm fine", history, strategy=strategy, for
 - Supports emotion labels: joy, sadness, anger, fear, surprise, disgust, neutral
 - Intensity prediction via softmax probabilities (0.0-1.0)
 
+**Model Limitations:**
+The base model may exhibit biases in emotion prediction:
+- **Rare emotions**: Anger, disgust, and neutral are rarely predicted even though the model supports them
+- **Class imbalance**: The model tends to favor sadness, fear, joy, and surprise over other emotions
+- **Root cause**: This is a limitation of the pre-trained model, not a calibration issue
+
+**Mitigation strategies:**
+- Fine-tune the model on domain-specific data with class weights
+- Use alternative models (e.g., `cardiffnlp/twitter-roberta-base-emotion`)
+- Apply class weights during inference
+- Consider ensemble methods combining multiple models
+
+The pipeline automatically detects and logs these limitations during inference.
+
 **Usage:**
 ```python
 from src.modeling import EmotionModel
 
-model = EmotionModel()
+# Initialize with temperature scaling for confidence calibration
+model = EmotionModel(temperature=1.3)  # Default: 1.3 (reduces overconfidence)
 result = model.predict_emotion("I'm feeling great today!")
 # Returns: {'label': 'joy', 'intensity': 0.95, ...}
 
@@ -267,13 +283,41 @@ results = model.predict_batch(["text1", "text2"], batch_size=32)
 
 # Ambiguity detection
 is_ambiguous, score = model.detect_ambiguity("I'm fine")
+
+# Check emotion distribution and class imbalance
+analysis = model.check_emotion_support(results)
+print(analysis['warnings'])  # Shows missing emotions or imbalance
 ```
+
+**Confidence Calibration:**
+- Temperature scaling: Adjust `temperature` parameter (default: 1.3)
+  - Higher values (>1.0): Reduce confidence (softer probabilities)
+  - Lower values (<1.0): Increase confidence (sharper probabilities)
+- Platt scaling and isotonic regression: Available via `CalibrationModel` class
+  - Requires scikit-learn: `pip install scikit-learn`
+  - See `CalibrationModel` docstring for example usage
 
 **Alternative Models:**
 The `EmotionModel` class can use any Hugging Face emotion classification model:
 ```python
-model = EmotionModel(model_name="cardiffnlp/twitter-roberta-base-emotion")
+model = EmotionModel(model_name="cardiffnlp/twitter-roberta-base-emotion", temperature=1.3)
 ```
+
+**Post-Processing Rules:**
+The pipeline includes rule-based post-processing to correct common misclassifications:
+- **Positive keywords** → joy (overrides sadness/fear when confidence ≥0.75)
+- **Gratitude patterns** → joy (overrides sadness)
+- **Progress indicators** → joy (overrides sadness)
+- **Humor patterns** → joy (overrides sadness)
+- **Low confidence + positive** → joy (intensity <0.6 with positive keywords)
+- **Anxiety patterns** → validates fear predictions
+- **Depression patterns** → validates sadness predictions
+- **Sarcasm detection** → flags for review
+- **Mixed emotions** → flags for review
+- **Negation patterns** → adjusts predictions
+- **Neutral detection** → overrides to neutral for low-confidence predictions
+
+High-confidence predictions (intensity >0.95) are automatically flagged for review.
 
 ## Scaling Considerations
 

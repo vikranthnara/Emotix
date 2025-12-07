@@ -19,7 +19,7 @@ class ContextAwarePostProcessor(EmotionPostProcessor):
                                  predicted_label: str,
                                  predicted_intensity: float,
                                  context_text: Optional[str] = None,
-                                 context_emotions: Optional[list] = None) -> Tuple[str, float, bool, bool]:
+                                 context_emotions: Optional[list] = None) -> Tuple[str, float, bool, bool, Optional[str]]:
         """
         Post-process with context awareness.
         
@@ -31,10 +31,10 @@ class ContextAwarePostProcessor(EmotionPostProcessor):
             context_emotions: List of previous emotion labels
             
         Returns:
-            Tuple of (corrected_label, corrected_intensity, was_overridden, needs_review)
+            Tuple of (corrected_label, corrected_intensity, was_overridden, needs_review, override_type)
         """
         # First apply standard post-processing
-        corrected_label, corrected_intensity, was_overridden = self.post_process(
+        corrected_label, corrected_intensity, was_overridden, override_type = self.post_process(
             text, predicted_label, predicted_intensity
         )
         
@@ -87,11 +87,11 @@ class ContextAwarePostProcessor(EmotionPostProcessor):
                         needs_review = True
                         logger.info(f"High confidence positive on negative context. Flagging for review.")
         
-        # Also check standard review flags
+        # Also check standard review flags (inherited from EmotionPostProcessor)
         if not needs_review:
-            needs_review = self.flag_for_review(text, predicted_label, predicted_intensity)
+            needs_review = self.flag_for_review(text, predicted_label, predicted_intensity, high_confidence_flag=False)
         
-        return corrected_label, corrected_intensity, was_overridden, needs_review
+        return corrected_label, corrected_intensity, was_overridden, needs_review, override_type
 
 
 def apply_context_aware_post_processing(df,
@@ -117,6 +117,7 @@ def apply_context_aware_post_processing(df,
     corrected_labels = []
     corrected_intensities = []
     override_flags = []
+    override_types = []
     review_flags = []
     
     for _, row in df.iterrows():
@@ -138,20 +139,43 @@ def apply_context_aware_post_processing(df,
         context_emotions = None
         # Could extract from history if we have it
         
-        corrected_label, corrected_intensity, was_overridden, needs_review = processor.post_process_with_context(
+        high_confidence = row.get('HighConfidenceFlag', False) if 'HighConfidenceFlag' in df.columns else False
+        
+        # Extract previous emotions from context if available
+        previous_emotions = None
+        if context_emotions:
+            previous_emotions = context_emotions
+        elif context_text:
+            # Try to extract emotions from context text (if we have history)
+            # This is a fallback if context_emotions is not provided
+            pass
+        
+        corrected_label, corrected_intensity, was_overridden, needs_review, override_type = processor.post_process_with_context(
             text, label, intensity, context_text, context_emotions
         )
+        
+        # Also check high confidence flag and temporal patterns
+        if not needs_review:
+            needs_review = processor.flag_for_review(
+                text, label, intensity,
+                high_confidence_flag=high_confidence,
+                previous_emotions=previous_emotions
+            )
         
         corrected_labels.append(corrected_label)
         corrected_intensities.append(corrected_intensity)
         override_flags.append(1 if was_overridden else 0)
+        override_types.append(override_type if was_overridden else None)
         review_flags.append(1 if needs_review else 0)
     
     df = df.copy()
     df['CorrectedLabel'] = corrected_labels
     df['CorrectedIntensity'] = corrected_intensities
     df['WasOverridden'] = override_flags
+    df['PostProcessingOverride'] = override_types
     df['NeedsReview'] = review_flags
+    # Store post-processing review flag separately
+    df['PostProcessingReviewFlag'] = review_flags
     
     return df
 

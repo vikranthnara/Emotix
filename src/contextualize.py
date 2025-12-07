@@ -103,6 +103,17 @@ def create_sequences_batch(df: pd.DataFrame,
         # Drop rows with invalid timestamps
         df = df.dropna(subset=['Timestamp'])
     
+    # Batch fetch user histories to avoid N+1 query problem
+    unique_users = df['UserID'].unique()
+    logger.info(f"Batch fetching histories for {len(unique_users)} unique users")
+    user_histories = {}
+    for user_id in unique_users:
+        user_histories[user_id] = persistence.fetch_history(
+            user_id,
+            limit=max_context_turns * 2  # Fetch more to filter by timestamp
+        )
+    logger.info(f"Fetched histories for {len(user_histories)} users")
+    
     sequences = []
     
     for _, row in df.iterrows():
@@ -111,11 +122,8 @@ def create_sequences_batch(df: pd.DataFrame,
         timestamp = pd.to_datetime(row['Timestamp'])
         utterance = row['NormalizedText']
         
-        # Fetch history before this timestamp
-        history = persistence.fetch_history(
-            user_id,
-            limit=max_context_turns * 2  # Fetch more to filter by timestamp
-        )
+        # Use cached history instead of fetching per utterance
+        history = user_histories.get(user_id, pd.DataFrame())
         
         # ALWAYS convert timestamps before any comparison - SQLite returns strings
         if not history.empty and 'Timestamp' in history.columns:

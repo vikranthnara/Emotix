@@ -49,11 +49,21 @@ class MWBPersistence:
                     NormalizedText TEXT NOT NULL,
                     PrimaryEmotionLabel TEXT,
                     IntensityScore_Primary REAL,
+                    OriginalEmotionLabel TEXT,
+                    OriginalIntensityScore REAL,
                     AmbiguityFlag INTEGER DEFAULT 0,
                     NormalizationFlags TEXT,
+                    PostProcessingOverride TEXT,
+                    FlagForReview INTEGER DEFAULT 0,
+                    PostProcessingReviewFlag INTEGER DEFAULT 0,
+                    AnomalyDetectionFlag INTEGER DEFAULT 0,
+                    HighConfidenceFlag INTEGER DEFAULT 0,
                     CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Migrate existing tables to add new columns if they don't exist
+            self._migrate_schema(cursor)
             
             # Create indexes for mwb_log
             cursor.execute("""
@@ -87,6 +97,64 @@ class MWBPersistence:
             logger.info("Database schema initialized")
         finally:
             conn.close()
+    
+    def _migrate_schema(self, cursor) -> None:
+        """Migrate existing schema to add new columns if needed."""
+        try:
+            # Check if PostProcessingOverride column exists
+            cursor.execute("PRAGMA table_info(mwb_log)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'PostProcessingOverride' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN PostProcessingOverride TEXT
+                """)
+                logger.info("Added PostProcessingOverride column to mwb_log")
+            
+            if 'FlagForReview' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN FlagForReview INTEGER DEFAULT 0
+                """)
+                logger.info("Added FlagForReview column to mwb_log")
+            
+            if 'OriginalEmotionLabel' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN OriginalEmotionLabel TEXT
+                """)
+                logger.info("Added OriginalEmotionLabel column to mwb_log")
+            
+            if 'OriginalIntensityScore' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN OriginalIntensityScore REAL
+                """)
+                logger.info("Added OriginalIntensityScore column to mwb_log")
+            
+            if 'PostProcessingReviewFlag' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN PostProcessingReviewFlag INTEGER DEFAULT 0
+                """)
+                logger.info("Added PostProcessingReviewFlag column to mwb_log")
+            
+            if 'AnomalyDetectionFlag' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN AnomalyDetectionFlag INTEGER DEFAULT 0
+                """)
+                logger.info("Added AnomalyDetectionFlag column to mwb_log")
+            
+            if 'HighConfidenceFlag' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN HighConfidenceFlag INTEGER DEFAULT 0
+                """)
+                logger.info("Added HighConfidenceFlag column to mwb_log")
+        except Exception as e:
+            logger.warning(f"Schema migration warning (may be expected for new tables): {e}")
     
     def write_results(self, df: pd.DataFrame, 
                      archive_raw: bool = True,
@@ -147,16 +215,26 @@ class MWBPersistence:
                             INSERT INTO mwb_log 
                             (UserID, Timestamp, NormalizedText, 
                              PrimaryEmotionLabel, IntensityScore_Primary,
-                             AmbiguityFlag, NormalizationFlags)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                             OriginalEmotionLabel, OriginalIntensityScore,
+                             AmbiguityFlag, NormalizationFlags,
+                             PostProcessingOverride, FlagForReview,
+                             PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             str(row['UserID']),
                             timestamp_str,
                             str(row['NormalizedText']),
                             row.get('PrimaryEmotionLabel'),
                             row.get('IntensityScore_Primary'),
+                            row.get('OriginalEmotionLabel'),
+                            row.get('OriginalIntensityScore'),
                             int(row.get('AmbiguityFlag', 0)),
-                            normalization_flags
+                            normalization_flags,
+                            row.get('PostProcessingOverride'),
+                            int(row.get('FlagForReview', 0)),
+                            int(row.get('PostProcessingReviewFlag', 0)),
+                            int(row.get('AnomalyDetectionFlag', 0)),
+                            int(row.get('HighConfidenceFlag', 0))
                         ))
                     
                     # Commit batch
@@ -197,7 +275,10 @@ class MWBPersistence:
             query = """
                 SELECT LogID, UserID, Timestamp, NormalizedText,
                        PrimaryEmotionLabel, IntensityScore_Primary,
-                       AmbiguityFlag, NormalizationFlags
+                       OriginalEmotionLabel, OriginalIntensityScore,
+                       AmbiguityFlag, NormalizationFlags,
+                       PostProcessingOverride, FlagForReview,
+                       PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag
                 FROM mwb_log
                 WHERE UserID = ?
             """

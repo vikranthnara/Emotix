@@ -14,6 +14,8 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from src.persistence import MWBPersistence
+from src.anomaly_detection import UserPatternAnalyzer
+from src.validation import MetricsTracker
 
 def print_section(title: str, char: "=" = "="):
     """Print a formatted section header."""
@@ -85,11 +87,13 @@ def analyze_intensity_scores(df: pd.DataFrame):
     low = (intensity < 0.5).sum()
     medium = ((intensity >= 0.5) & (intensity < 0.8)).sum()
     high = (intensity >= 0.8).sum()
+    very_high = (intensity >= 0.95).sum()
     
     print(f"\nIntensity categories:")
     print(f"  Low (<0.5):    {low:3d} ({low/len(df)*100:5.1f}%)")
     print(f"  Medium (0.5-0.8): {medium:3d} ({medium/len(df)*100:5.1f}%)")
     print(f"  High (≥0.8):   {high:3d} ({high/len(df)*100:5.1f}%)")
+    print(f"  Very High (≥0.95): {very_high:3d} ({very_high/len(df)*100:5.1f}%) ⚠️ Flagged for review")
 
 def analyze_post_processing(df: pd.DataFrame):
     """Analyze post-processing overrides."""
@@ -108,13 +112,16 @@ def analyze_post_processing(df: pd.DataFrame):
     
     if override_count > 0:
         override_types = overrides['PostProcessingOverride'].value_counts()
-        print(f"\nOverride types:")
+        print(f"\nOverride types (by frequency):")
         for override_type, count in override_types.items():
-            print(f"  {override_type}: {count}")
+            pct = (count / override_count) * 100
+            print(f"  {override_type}: {count} ({pct:.1f}% of overrides)")
         
         # Show what emotions were overridden
         print(f"\nOriginal emotions (before override):")
-        original_emotions = df.loc[overrides.index, 'PrimaryEmotionLabel'].value_counts()
+        # Use OriginalEmotionLabel if available, fallback to PrimaryEmotionLabel
+        original_col = 'OriginalEmotionLabel' if 'OriginalEmotionLabel' in df.columns else 'PrimaryEmotionLabel'
+        original_emotions = df.loc[overrides.index, original_col].value_counts()
         for emotion, count in original_emotions.items():
             print(f"  {emotion}: {count}")
         
@@ -122,11 +129,15 @@ def analyze_post_processing(df: pd.DataFrame):
         print(f"\nSample overrides:")
         for idx, row in overrides.head(5).iterrows():
             text = row.get('NormalizedText', 'N/A')[:60]
-            original = row.get('PrimaryEmotionLabel', 'N/A')
-            override = row.get('PostProcessingOverride', 'N/A')
+            original = row.get('OriginalEmotionLabel', row.get('PrimaryEmotionLabel', 'N/A'))
+            current = row.get('PrimaryEmotionLabel', 'N/A')
+            override_type = row.get('PostProcessingOverride', 'N/A')
             intensity = row.get('IntensityScore_Primary', 'N/A')
             print(f"  '{text}...'")
-            print(f"    {original} → {override} (intensity: {intensity:.3f})")
+            if original == current:
+                print(f"    {original} (no change, override_type: {override_type}, intensity: {intensity:.3f})")
+            else:
+                print(f"    {original} → {current} (via {override_type}, intensity: {intensity:.3f})")
     else:
         print("  ✓ No post-processing overrides applied")
 
@@ -161,18 +172,47 @@ def analyze_review_flags(df: pd.DataFrame):
     """Analyze human review flags."""
     print_section("🚩 Human Review Flag Analysis")
     
-    if 'FlagForReview' not in df.columns:
+    if 'FlagForReview' not in df.columns and 'HighConfidenceFlag' not in df.columns:
         print("  ℹ️  Review flag data not persisted in database")
         print("     (Flags are set during inference but not stored)")
         return
     
-    flagged = df['FlagForReview'].sum()
     total = len(df)
+    flagged = df['FlagForReview'].sum() if 'FlagForReview' in df.columns else 0
+    high_conf = df['HighConfidenceFlag'].sum() if 'HighConfidenceFlag' in df.columns else 0
     
-    print(f"\nFlagged for review: {flagged} / {total} ({flagged/total*100:.1f}%)")
+    print(f"\nTotal flagged for review: {flagged} / {total} ({flagged/total*100:.1f}%)")
     
+    # Break down by flag source
+    post_processing_flag = df['PostProcessingReviewFlag'].sum() if 'PostProcessingReviewFlag' in df.columns else 0
+    anomaly_flag = df['AnomalyDetectionFlag'].sum() if 'AnomalyDetectionFlag' in df.columns else 0
+    
+    print(f"\nFlag breakdown by source:")
+    print(f"  Post-processing flags: {post_processing_flag} ({post_processing_flag/total*100:.1f}%)")
+    print(f"  Anomaly detection flags: {anomaly_flag} ({anomaly_flag/total*100:.1f}%)")
+    print(f"  High confidence flags (≥0.95): {high_conf} ({high_conf/total*100:.1f}%)")
+    
+    # Show intensity distribution of flagged predictions
     if flagged > 0:
         flagged_df = df[df['FlagForReview'] == True]
+        
+        if 'IntensityScore_Primary' in flagged_df.columns:
+            intensities = flagged_df['IntensityScore_Primary']
+            print(f"\nIntensity distribution of flagged predictions:")
+            print(f"  Mean: {intensities.mean():.3f}")
+            print(f"  Median: {intensities.median():.3f}")
+            print(f"  Min: {intensities.min():.3f}")
+            print(f"  Max: {intensities.max():.3f}")
+            
+            # Count low-intensity flags (potential false positives)
+            low_intensity = (intensities < 0.7).sum()
+            medium_intensity = ((intensities >= 0.7) & (intensities < 0.85)).sum()
+            high_intensity = (intensities >= 0.85).sum()
+            
+            print(f"\n  Low intensity (<0.7): {low_intensity} ({low_intensity/flagged*100:.1f}%) ⚠️")
+            print(f"  Medium intensity (0.7-0.85): {medium_intensity} ({medium_intensity/flagged*100:.1f}%)")
+            print(f"  High intensity (≥0.85): {high_intensity} ({high_intensity/flagged*100:.1f}%)")
+        
         print(f"\nFlagged emotion distribution:")
         flag_emotions = flagged_df['PrimaryEmotionLabel'].value_counts()
         for emotion, count in flag_emotions.items():
@@ -183,7 +223,17 @@ def analyze_review_flags(df: pd.DataFrame):
             text = row.get('NormalizedText', 'N/A')[:60]
             emotion = row.get('PrimaryEmotionLabel', 'N/A')
             intensity = row.get('IntensityScore_Primary', 'N/A')
-            print(f"  '{text}...' → {emotion} ({intensity:.3f})")
+            
+            # Show which flags are set
+            flags = []
+            if row.get('PostProcessingReviewFlag', False):
+                flags.append('post-processing')
+            if row.get('AnomalyDetectionFlag', False):
+                flags.append('anomaly')
+            if row.get('HighConfidenceFlag', False):
+                flags.append('high-confidence')
+            flag_source = ', '.join(flags) if flags else 'unknown'
+            print(f"  '{text}...' → {emotion} ({intensity:.3f}) [flags: {flag_source}]")
     else:
         print("  ✓ No predictions flagged for review")
 
@@ -279,14 +329,31 @@ def main():
     
     # Query all records (only columns that exist in schema)
     conn = sqlite3.connect(db_path)
-    df = pd.read_sql_query("""
-        SELECT 
-            LogID, UserID, Timestamp, NormalizedText,
-            PrimaryEmotionLabel, IntensityScore_Primary,
-            AmbiguityFlag, NormalizationFlags
-        FROM mwb_log
-        ORDER BY Timestamp
-    """, conn)
+    # Try to get all columns, including new ones
+    try:
+        df = pd.read_sql_query("""
+            SELECT 
+                LogID, UserID, Timestamp, NormalizedText,
+                PrimaryEmotionLabel, IntensityScore_Primary,
+                OriginalEmotionLabel, OriginalIntensityScore,
+                AmbiguityFlag, NormalizationFlags,
+                PostProcessingOverride, FlagForReview,
+                PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag
+            FROM mwb_log
+            ORDER BY Timestamp
+        """, conn)
+    except:
+        # Fallback if new columns don't exist yet
+        df = pd.read_sql_query("""
+            SELECT 
+                LogID, UserID, Timestamp, NormalizedText,
+                PrimaryEmotionLabel, IntensityScore_Primary,
+                OriginalEmotionLabel, OriginalIntensityScore,
+                AmbiguityFlag, NormalizationFlags,
+                PostProcessingOverride, FlagForReview
+            FROM mwb_log
+            ORDER BY Timestamp
+        """, conn)
     conn.close()
     
     # Convert types
@@ -310,6 +377,63 @@ def main():
     analyze_temporal_patterns(df)
     analyze_text_quality(df)
     
+    # Evaluation Metrics
+    print_section("📊 Evaluation Metrics")
+    tracker = MetricsTracker()
+    
+    # Override effectiveness
+    override_metrics = tracker.track_override_effectiveness(df)
+    if override_metrics:
+        print(f"\nOverride Effectiveness:")
+        print(f"  Total overrides: {override_metrics.get('total_overrides', 0)}")
+        print(f"  Override rate: {override_metrics.get('override_rate', 0)*100:.1f}%")
+        if override_metrics.get('precision') is not None:
+            print(f"  Precision: {override_metrics['precision']:.3f}")
+            print(f"  Recall: {override_metrics['recall']:.3f}")
+    
+    # Calibration quality
+    calibration_metrics = tracker.track_calibration_quality(df)
+    if calibration_metrics:
+        print(f"\nCalibration Quality:")
+        print(f"  Mean intensity: {calibration_metrics.get('mean_intensity', 0):.3f}")
+        print(f"  High confidence (≥0.95): {calibration_metrics.get('high_confidence_rate', 0)*100:.1f}%")
+        if 'expected_calibration_error' in calibration_metrics:
+            print(f"  Expected Calibration Error (ECE): {calibration_metrics['expected_calibration_error']:.3f}")
+            print(f"    (Lower is better, <0.1 is well-calibrated)")
+    
+    # Emotion distribution tracking
+    dist_metrics = tracker.track_emotion_distribution(df)
+    if dist_metrics:
+        print(f"\nEmotion Distribution Tracking:")
+        print(f"  Total predictions: {dist_metrics.get('total_predictions', 0)}")
+        print(f"  Unique emotions: {len(dist_metrics.get('emotion_counts', {}))}")
+    
+    # Anomaly Detection
+    print_section("🚨 User Anomaly Detection")
+    analyzer = UserPatternAnalyzer()
+    user_analysis = analyzer.analyze_all_users(df)
+    
+    if len(user_analysis) > 0:
+        flagged_users = user_analysis[user_analysis['flag_for_review'] == True]
+        print(f"\nUsers flagged for review: {len(flagged_users)}")
+        
+        if len(flagged_users) > 0:
+            print("\nFlagged users:")
+            for _, user_row in flagged_users.iterrows():
+                print(f"\n  User: {user_row['user_id']}")
+                print(f"    Risk Level: {user_row['risk_level'].upper()}")
+                print(f"    Records: {user_row['total_records']}")
+                print(f"    Avg Intensity: {user_row['avg_intensity']:.3f}")
+                print(f"    Anomalies:")
+                for anomaly in user_row['anomalies']:
+                    print(f"      - {anomaly}")
+        
+        # Show all user risk levels
+        print(f"\nUser risk distribution:")
+        risk_counts = user_analysis['risk_level'].value_counts()
+        for risk, count in risk_counts.items():
+            print(f"  {risk}: {count}")
+    
     # Summary
     print_section("✅ Analysis Complete")
     print("\nKey insights:")
@@ -326,6 +450,16 @@ def main():
     if 'AmbiguityFlag' in df.columns:
         ambiguous_count = df['AmbiguityFlag'].sum()
         print(f"  • Ambiguous predictions: {ambiguous_count} ({ambiguous_count/len(df)*100:.1f}%)")
+    
+    if 'PostProcessingOverride' in df.columns:
+        override_count = df['PostProcessingOverride'].notna().sum()
+        if override_count > 0:
+            print(f"  • Post-processing overrides: {override_count} ({override_count/len(df)*100:.1f}%)")
+    
+    if 'FlagForReview' in df.columns:
+        flagged_count = df['FlagForReview'].sum()
+        if flagged_count > 0:
+            print(f"  • Flagged for review: {flagged_count} ({flagged_count/len(df)*100:.1f}%)")
     
     print()
     return 0
