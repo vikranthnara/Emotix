@@ -96,12 +96,38 @@ def create_sequences_batch(df: pd.DataFrame,
     """
     logger.info(f"Creating sequences for {len(df)} utterances")
     
+    # Early return for empty DataFrame
+    if df.empty or len(df) == 0:
+        logger.warning("Empty DataFrame provided to create_sequences_batch")
+        df = df.copy()
+        if 'Sequence' not in df.columns:
+            df['Sequence'] = []
+        return df
+    
     # Ensure input DataFrame Timestamp column is datetime type upfront
     if 'Timestamp' in df.columns:
         df = df.copy()
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         # Drop rows with invalid timestamps
         df = df.dropna(subset=['Timestamp'])
+    
+    # Check again after timestamp conversion
+    if df.empty or len(df) == 0:
+        logger.warning("DataFrame became empty after timestamp conversion")
+        df = df.copy()
+        if 'Sequence' not in df.columns:
+            df['Sequence'] = []
+        return df
+    
+    # Ensure required columns exist
+    required_cols = ['UserID', 'Timestamp', 'NormalizedText']
+    missing = set(required_cols) - set(df.columns)
+    if missing:
+        logger.error(f"Missing required columns: {missing}")
+        df = df.copy()
+        if 'Sequence' not in df.columns:
+            df['Sequence'] = []
+        return df
     
     # Batch fetch user histories to avoid N+1 query problem
     unique_users = df['UserID'].unique()

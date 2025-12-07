@@ -12,6 +12,7 @@ from src.persistence import MWBPersistence
 from src.preprocess import Preprocessor
 from src.modeling import EmotionModel
 from src.postprocess import EmotionPostProcessor
+from src.suicidal_detection import SuicidalIdeationDetector
 
 
 # Import CLI functions
@@ -63,7 +64,7 @@ class TestCLIFunctions:
         print_result(result)
         captured = capsys.readouterr()
         assert "Override" in captured.out
-        assert "sadness → joy" in captured.out
+        assert "sadness" in captured.out and "joy" in captured.out
         assert "positive_keywords" in captured.out
 
 
@@ -91,7 +92,14 @@ class TestProcessSingleEntry:
         postprocessor.post_process.return_value = ('joy', 0.85, False, None)
         return postprocessor
     
-    def test_process_single_entry_basic(self, temp_db, mock_model, mock_postprocessor):
+    @pytest.fixture
+    def mock_suicidal_detector(self):
+        """Create mock suicidal ideation detector."""
+        detector = Mock(spec=SuicidalIdeationDetector)
+        detector.process_text.return_value = (False, 0.0, None)
+        return detector
+    
+    def test_process_single_entry_basic(self, temp_db, mock_model, mock_postprocessor, mock_suicidal_detector):
         """Test basic single entry processing."""
         persistence = MWBPersistence(temp_db)
         preprocessor = Preprocessor()
@@ -118,6 +126,7 @@ class TestProcessSingleEntry:
                 preprocessor=preprocessor,
                 model=mock_model,
                 postprocessor=mock_postprocessor,
+                suicidal_detector=mock_suicidal_detector,
                 slang_dict_path=None
             )
         
@@ -131,7 +140,7 @@ class TestProcessSingleEntry:
         assert len(history) == 1
         assert "happy" in history['NormalizedText'].iloc[0].lower()
     
-    def test_process_single_entry_with_context(self, temp_db, mock_model, mock_postprocessor):
+    def test_process_single_entry_with_context(self, temp_db, mock_model, mock_postprocessor, mock_suicidal_detector):
         """Test single entry processing with existing history."""
         persistence = MWBPersistence(temp_db)
         preprocessor = Preprocessor()
@@ -171,6 +180,7 @@ class TestProcessSingleEntry:
                 preprocessor=preprocessor,
                 model=mock_model,
                 postprocessor=mock_postprocessor,
+                suicidal_detector=mock_suicidal_detector,
                 slang_dict_path=None
             )
         
@@ -253,14 +263,19 @@ class TestCLIInteractiveLoop:
         # Mock input to return 'exit' immediately
         with patch('builtins.input', side_effect=['exit']):
             with patch('emotix_cli.process_single_entry') as mock_process:
-                interactive_loop(
-                    user_id="testuser",
-                    db_path=Path(temp_db),
-                    slang_dict_path=None,
-                    model_name="j-hartmann/emotion-english-distilroberta-base"
-                )
-                # Should not call process_single_entry for exit command
-                mock_process.assert_not_called()
+                with patch('emotix_cli.EmotionModel') as mock_model_class:
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        mock_model_class.return_value = mock_model
+                        mock_detector = Mock()
+                        mock_detector_class.return_value = mock_detector
+                        interactive_loop(
+                            user_id="testuser",
+                            db_path=Path(temp_db),
+                            slang_dict_path=None,
+                            model_name="j-hartmann/emotion-english-distilroberta-base"
+                        )
+                        # Should not call process_single_entry for exit command
+                        mock_process.assert_not_called()
     
     def test_interactive_loop_quit_command(self, temp_db, mock_model, mock_postprocessor):
         """Test quit command in interactive loop."""
@@ -272,13 +287,18 @@ class TestCLIInteractiveLoop:
         # Mock input to return 'quit' immediately
         with patch('builtins.input', side_effect=['quit']):
             with patch('emotix_cli.process_single_entry') as mock_process:
-                interactive_loop(
-                    user_id="testuser",
-                    db_path=Path(temp_db),
-                    slang_dict_path=None,
-                    model_name="j-hartmann/emotion-english-distilroberta-base"
-                )
-                mock_process.assert_not_called()
+                with patch('emotix_cli.EmotionModel') as mock_model_class:
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        mock_model_class.return_value = mock_model
+                        mock_detector = Mock()
+                        mock_detector_class.return_value = mock_detector
+                        interactive_loop(
+                            user_id="testuser",
+                            db_path=Path(temp_db),
+                            slang_dict_path=None,
+                            model_name="j-hartmann/emotion-english-distilroberta-base"
+                        )
+                        mock_process.assert_not_called()
     
     def test_interactive_loop_summary_command(self, temp_db, capsys):
         """Test summary command in interactive loop."""

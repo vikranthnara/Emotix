@@ -15,6 +15,7 @@ from src.persistence import MWBPersistence
 from src.utils import setup_logging, checkpoint_dataframe
 from src.context_strategies import RecentContextStrategy
 from src.anomaly_detection import UserPatternAnalyzer
+from src.suicidal_detection import SuicidalIdeationDetector
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +106,39 @@ def run_full_pipeline(
     if checkpoint_dir:
         checkpoint_dataframe(df, checkpoint_dir, "modeling")
     
-    # Step 4.5: Anomaly Detection (before persistence)
-    logger.info("[4.5/5] Anomaly Detection...")
+    # Step 4.5: Suicidal Ideation Detection (before persistence)
+    logger.info("[4.5/5] Suicidal Ideation Detection...")
+    detector = SuicidalIdeationDetector()
+    suicidal_flags = []
+    suicidal_confidences = []
+    suicidal_patterns = []
+    
+    # Use original Text column if available, otherwise use NormalizedText
+    text_col = 'Text' if 'Text' in df.columns else 'NormalizedText'
+    
+    for idx, row in df.iterrows():
+        text = row.get(text_col, '')
+        user_id = row.get('UserID', None)
+        timestamp = row.get('Timestamp', None)
+        
+        is_detected, confidence, pattern_type = detector.process_text(
+            text, user_id=user_id, timestamp=timestamp
+        )
+        
+        suicidal_flags.append(is_detected)
+        suicidal_confidences.append(confidence)
+        suicidal_patterns.append(pattern_type)
+    
+    df['SuicidalIdeationFlag'] = suicidal_flags
+    df['SuicidalIdeationConfidence'] = suicidal_confidences
+    df['SuicidalIdeationPattern'] = suicidal_patterns
+    
+    suicidal_count = sum(suicidal_flags)
+    if suicidal_count > 0:
+        logger.warning(f"Detected {suicidal_count} record(s) with suicidal ideation patterns")
+    
+    # Step 4.6: Anomaly Detection (before persistence)
+    logger.info("[4.6/5] Anomaly Detection...")
     analyzer = UserPatternAnalyzer()
     user_analysis = analyzer.analyze_all_users(df)
     flagged_users = analyzer.flag_high_risk_users(df)
@@ -140,8 +172,15 @@ def run_full_pipeline(
     else:
         high_conf_flag = pd.Series([False] * len(df))
     
-    # Combine: flag if any source flags it
-    df['FlagForReview'] = post_processing_flag | anomaly_flag | high_conf_flag
+    # Suicidal ideation flag (if exists)
+    suicidal_flag = df.get('SuicidalIdeationFlag', pd.Series([False] * len(df)))
+    if isinstance(suicidal_flag, pd.Series):
+        suicidal_flag = suicidal_flag.fillna(False).astype(bool)
+    else:
+        suicidal_flag = pd.Series([False] * len(df))
+    
+    # Combine: flag if any source flags it (suicidal ideation always flags for review)
+    df['FlagForReview'] = post_processing_flag | anomaly_flag | high_conf_flag | suicidal_flag
     
     # Step 5: Persistence
     logger.info("[5/5] Persistence...")
@@ -150,9 +189,10 @@ def run_full_pipeline(
     post_processing_count = df.get('PostProcessingReviewFlag', pd.Series([0] * len(df))).sum() if 'PostProcessingReviewFlag' in df.columns else 0
     anomaly_count = df.get('AnomalyDetectionFlag', pd.Series([0] * len(df))).sum() if 'AnomalyDetectionFlag' in df.columns else 0
     high_conf_count = df.get('HighConfidenceFlag', pd.Series([0] * len(df))).sum() if 'HighConfidenceFlag' in df.columns else 0
+    suicidal_count = df.get('SuicidalIdeationFlag', pd.Series([0] * len(df))).sum() if 'SuicidalIdeationFlag' in df.columns else 0
     total_flag_count = df.get('FlagForReview', pd.Series([0] * len(df))).sum() if 'FlagForReview' in df.columns else 0
     
-    logger.info(f"Flag counts before persistence: PostProcessing={post_processing_count}, Anomaly={anomaly_count}, HighConf={high_conf_count}, Total={total_flag_count}")
+    logger.info(f"Flag counts before persistence: PostProcessing={post_processing_count}, Anomaly={anomaly_count}, HighConf={high_conf_count}, Suicidal={suicidal_count}, Total={total_flag_count}")
     
     # Ensure all flag columns are present (set to False if missing)
     if 'PostProcessingReviewFlag' not in df.columns:
@@ -164,6 +204,9 @@ def run_full_pipeline(
     if 'HighConfidenceFlag' not in df.columns:
         df['HighConfidenceFlag'] = False
         logger.warning("HighConfidenceFlag column missing, setting to False")
+    if 'SuicidalIdeationFlag' not in df.columns:
+        df['SuicidalIdeationFlag'] = False
+        logger.warning("SuicidalIdeationFlag column missing, setting to False")
     if 'FlagForReview' not in df.columns:
         df['FlagForReview'] = False
         logger.warning("FlagForReview column missing, setting to False")

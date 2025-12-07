@@ -27,7 +27,7 @@ def print_section(title: str, char: "=" = "="):
 
 def analyze_emotion_distribution(df: pd.DataFrame):
     """Analyze emotion distribution."""
-    print_section("📊 Emotion Distribution Analysis")
+    print_section("📊 Emotion Distribution")
     
     if 'PrimaryEmotionLabel' not in df.columns:
         print("  ❌ No emotion labels found")
@@ -36,27 +36,23 @@ def analyze_emotion_distribution(df: pd.DataFrame):
     emotion_counts = df['PrimaryEmotionLabel'].value_counts()
     total = len(df)
     
-    print(f"\nTotal predictions: {total}")
-    print(f"\nEmotion breakdown:")
-    print(f"{'Emotion':<20} {'Count':<10} {'Percentage':<12} {'Intensity (avg)':<15}")
-    print("-" * 60)
+    print(f"  Total: {total} predictions")
+    print(f"  {'Emotion':<15} {'Count':<8} {'%':<8} {'Avg Intensity':<12}")
+    print(f"  {'-'*45}")
     
     for emotion, count in emotion_counts.items():
         pct = (count / total) * 100
         emotion_df = df[df['PrimaryEmotionLabel'] == emotion]
         avg_intensity = emotion_df['IntensityScore_Primary'].mean() if 'IntensityScore_Primary' in df.columns else 0.0
-        print(f"{emotion:<20} {count:<10} {pct:>6.1f}%      {avg_intensity:>6.3f}")
+        print(f"  {emotion:<15} {count:<8} {pct:>6.1f}%  {avg_intensity:>10.3f}")
     
     # Check for class imbalance
     max_count = emotion_counts.max()
     min_count = emotion_counts.min()
     imbalance_ratio = max_count / min_count if min_count > 0 else float('inf')
     
-    print(f"\n⚠️  Class imbalance ratio: {imbalance_ratio:.2f}x")
     if imbalance_ratio > 3:
-        print("   → Significant class imbalance detected")
-    else:
-        print("   → Relatively balanced distribution")
+        print(f"  ⚠️  Class imbalance: {imbalance_ratio:.1f}x (significant)")
 
 def analyze_intensity_scores(df: pd.DataFrame):
     """Analyze intensity score distribution."""
@@ -68,22 +64,7 @@ def analyze_intensity_scores(df: pd.DataFrame):
     
     intensity = df['IntensityScore_Primary']
     
-    print(f"\nBasic Statistics:")
-    print(f"  Mean:   {intensity.mean():.4f}")
-    print(f"  Median: {intensity.median():.4f}")
-    print(f"  Std:    {intensity.std():.4f}")
-    print(f"  Min:    {intensity.min():.4f}")
-    print(f"  Max:    {intensity.max():.4f}")
-    
-    # Distribution by quartiles
-    q25 = intensity.quantile(0.25)
-    q50 = intensity.quantile(0.50)
-    q75 = intensity.quantile(0.75)
-    
-    print(f"\nQuartiles:")
-    print(f"  Q1 (25%): {q25:.4f}")
-    print(f"  Q2 (50%): {q50:.4f}")
-    print(f"  Q3 (75%): {q75:.4f}")
+    print(f"  Mean: {intensity.mean():.3f}  |  Median: {intensity.median():.3f}  |  Range: [{intensity.min():.3f}, {intensity.max():.3f}]")
     
     # Intensity distribution
     low = (intensity < 0.5).sum()
@@ -91,32 +72,22 @@ def analyze_intensity_scores(df: pd.DataFrame):
     high = (intensity >= 0.8).sum()
     very_high = (intensity >= 0.95).sum()
     
-    print(f"\nIntensity categories:")
-    print(f"  Low (<0.5):    {low:3d} ({low/len(df)*100:5.1f}%)")
-    print(f"  Medium (0.5-0.8): {medium:3d} ({medium/len(df)*100:5.1f}%)")
-    print(f"  High (≥0.8):   {high:3d} ({high/len(df)*100:5.1f}%)")
-    print(f"  Very High (≥0.95): {very_high:3d} ({very_high/len(df)*100:5.1f}%) ⚠️ Flagged for review")
+    print(f"  Low (<0.5): {low} ({low/len(df)*100:.1f}%)  |  Medium (0.5-0.8): {medium} ({medium/len(df)*100:.1f}%)  |  High (≥0.8): {high} ({high/len(df)*100:.1f}%)  |  Very High (≥0.95): {very_high} ({very_high/len(df)*100:.1f}%)")
 
 def analyze_post_processing(df: pd.DataFrame):
     """Analyze post-processing overrides."""
-    print_section("🔍 Post-Processing Analysis")
+    print_section("🔍 Post-Processing")
     
     if 'PostProcessingOverride' not in df.columns:
-        print("  ℹ️  Post-processing override data not persisted in database")
-        print("     (Overrides are applied during inference but not stored)")
         return
     
-    # Only count actual overrides where label changed (PostProcessingOverride is not None)
-    # and verify that original != current to ensure it's a real override
+    # Only count actual overrides where label changed
     overrides = df[df['PostProcessingOverride'].notna()].copy()
     
     # Filter to only include records where label actually changed
     if 'OriginalEmotionLabel' in overrides.columns and 'PrimaryEmotionLabel' in overrides.columns:
-        # Fill None OriginalEmotionLabel with PrimaryEmotionLabel for comparison
         overrides['OriginalEmotionLabel'] = overrides['OriginalEmotionLabel'].fillna(overrides['PrimaryEmotionLabel'])
-        # Only count as override if original != current
         overrides = overrides[overrides['OriginalEmotionLabel'] != overrides['PrimaryEmotionLabel']]
-        # Also filter out where both are None or empty
         overrides = overrides[
             (overrides['OriginalEmotionLabel'].notna()) & 
             (overrides['PrimaryEmotionLabel'].notna()) &
@@ -127,65 +98,32 @@ def analyze_post_processing(df: pd.DataFrame):
     total = len(df)
     override_count = len(overrides)
     
-    print(f"\nTotal overrides: {override_count} / {total} ({override_count/total*100:.1f}%)")
-    
     if override_count > 0:
+        print(f"  Overrides: {override_count} / {total} ({override_count/total*100:.1f}%)")
         override_types = overrides['PostProcessingOverride'].value_counts()
-        print(f"\nOverride types (by frequency):")
-        for override_type, count in override_types.items():
-            pct = (count / override_count) * 100
-            print(f"  {override_type}: {count} ({pct:.1f}% of overrides)")
-        
-        # Show what emotions were overridden
-        print(f"\nOriginal emotions (before override):")
-        # Use OriginalEmotionLabel if available, fallback to PrimaryEmotionLabel
-        original_col = 'OriginalEmotionLabel' if 'OriginalEmotionLabel' in df.columns else 'PrimaryEmotionLabel'
-        original_emotions = df.loc[overrides.index, original_col].value_counts()
-        for emotion, count in original_emotions.items():
-            print(f"  {emotion}: {count}")
-        
-        # Show sample overrides
-        print(f"\nSample overrides:")
-        for idx, row in overrides.head(5).iterrows():
-            text = row.get('NormalizedText', 'N/A')[:60]
-            original = row.get('OriginalEmotionLabel', row.get('PrimaryEmotionLabel', 'N/A'))
-            current = row.get('PrimaryEmotionLabel', 'N/A')
-            override_type = row.get('PostProcessingOverride', 'N/A')
-            intensity = row.get('IntensityScore_Primary', 'N/A')
-            print(f"  '{text}...'")
-            if original == current:
-                print(f"    {original} (no change, override_type: {override_type}, intensity: {intensity:.3f})")
-            else:
-                print(f"    {original} → {current} (via {override_type}, intensity: {intensity:.3f})")
+        top_types = ', '.join([f"{t}({c})" for t, c in override_types.head(3).items()])
+        print(f"  Top types: {top_types}")
     else:
-        print("  ✓ No post-processing overrides applied")
+        print("  ✓ No overrides applied")
 
 def analyze_ambiguity(df: pd.DataFrame):
     """Analyze ambiguity detection."""
-    print_section("⚠️  Ambiguity Detection Analysis")
+    print_section("⚠️  Ambiguity Detection")
     
     if 'AmbiguityFlag' not in df.columns:
-        print("  ❌ No ambiguity flags found")
         return
     
     ambiguous = df['AmbiguityFlag'].sum()
     total = len(df)
     
-    print(f"\nAmbiguous predictions: {ambiguous} / {total} ({ambiguous/total*100:.1f}%)")
-    
     if ambiguous > 0:
+        print(f"  Ambiguous: {ambiguous} / {total} ({ambiguous/total*100:.1f}%)")
         ambiguous_df = df[df['AmbiguityFlag'] == True]
-        print(f"\nAmbiguous emotion distribution:")
         amb_emotions = ambiguous_df['PrimaryEmotionLabel'].value_counts()
-        for emotion, count in amb_emotions.items():
-            print(f"  {emotion}: {count}")
-        
-        print(f"\nSample ambiguous predictions:")
-        for idx, row in ambiguous_df.head(3).iterrows():
-            text = row.get('NormalizedText', 'N/A')[:60]
-            emotion = row.get('PrimaryEmotionLabel', 'N/A')
-            intensity = row.get('IntensityScore_Primary', 'N/A')
-            print(f"  '{text}...' → {emotion} ({intensity:.3f})")
+        top_amb = ', '.join([f'{e}({c})' for e, c in amb_emotions.head(3).items()])
+        print(f"  Top emotions: {top_amb}")
+    else:
+        print("  ✓ No ambiguous predictions")
 
 def analyze_review_flags(df: pd.DataFrame):
     """Analyze human review flags."""
@@ -200,61 +138,71 @@ def analyze_review_flags(df: pd.DataFrame):
     flagged = df['FlagForReview'].sum() if 'FlagForReview' in df.columns else 0
     high_conf = df['HighConfidenceFlag'].sum() if 'HighConfidenceFlag' in df.columns else 0
     
-    print(f"\nTotal flagged for review: {flagged} / {total} ({flagged/total*100:.1f}%)")
+    print(f"  Total flagged: {flagged} / {total} ({flagged/total*100:.1f}%)")
     
-    # Break down by flag source
-    post_processing_flag = df['PostProcessingReviewFlag'].sum() if 'PostProcessingReviewFlag' in df.columns else 0
-    anomaly_flag = df['AnomalyDetectionFlag'].sum() if 'AnomalyDetectionFlag' in df.columns else 0
-    
-    print(f"\nFlag breakdown by source:")
-    print(f"  Post-processing flags: {post_processing_flag} ({post_processing_flag/total*100:.1f}%)")
-    print(f"  Anomaly detection flags: {anomaly_flag} ({anomaly_flag/total*100:.1f}%)")
-    print(f"  High confidence flags (≥0.95): {high_conf} ({high_conf/total*100:.1f}%)")
-    
-    # Show intensity distribution of flagged predictions
     if flagged > 0:
+        # Break down by flag source
+        post_processing_flag = df['PostProcessingReviewFlag'].sum() if 'PostProcessingReviewFlag' in df.columns else 0
+        anomaly_flag = df['AnomalyDetectionFlag'].sum() if 'AnomalyDetectionFlag' in df.columns else 0
+        suicidal_flag = df['SuicidalIdeationFlag'].sum() if 'SuicidalIdeationFlag' in df.columns else 0
+        
+        print(f"  Sources: Post-processing ({post_processing_flag}), Anomaly ({anomaly_flag}), High-confidence ({high_conf}), Suicidal ideation ({suicidal_flag})")
+        
         flagged_df = df[df['FlagForReview'] == True]
-        
         if 'IntensityScore_Primary' in flagged_df.columns:
-            intensities = flagged_df['IntensityScore_Primary']
-            print(f"\nIntensity distribution of flagged predictions:")
-            print(f"  Mean: {intensities.mean():.3f}")
-            print(f"  Median: {intensities.median():.3f}")
-            print(f"  Min: {intensities.min():.3f}")
-            print(f"  Max: {intensities.max():.3f}")
-            
-            # Count low-intensity flags (potential false positives)
-            low_intensity = (intensities < 0.7).sum()
-            medium_intensity = ((intensities >= 0.7) & (intensities < 0.85)).sum()
-            high_intensity = (intensities >= 0.85).sum()
-            
-            print(f"\n  Low intensity (<0.7): {low_intensity} ({low_intensity/flagged*100:.1f}%) ⚠️")
-            print(f"  Medium intensity (0.7-0.85): {medium_intensity} ({medium_intensity/flagged*100:.1f}%)")
-            print(f"  High intensity (≥0.85): {high_intensity} ({high_intensity/flagged*100:.1f}%)")
-        
-        print(f"\nFlagged emotion distribution:")
-        flag_emotions = flagged_df['PrimaryEmotionLabel'].value_counts()
-        for emotion, count in flag_emotions.items():
-            print(f"  {emotion}: {count}")
-        
-        print(f"\nSample flagged predictions:")
-        for idx, row in flagged_df.head(5).iterrows():
-            text = row.get('NormalizedText', 'N/A')[:60]
-            emotion = row.get('PrimaryEmotionLabel', 'N/A')
-            intensity = row.get('IntensityScore_Primary', 'N/A')
-            
-            # Show which flags are set
-            flags = []
-            if row.get('PostProcessingReviewFlag', False):
-                flags.append('post-processing')
-            if row.get('AnomalyDetectionFlag', False):
-                flags.append('anomaly')
-            if row.get('HighConfidenceFlag', False):
-                flags.append('high-confidence')
-            flag_source = ', '.join(flags) if flags else 'unknown'
-            print(f"  '{text}...' → {emotion} ({intensity:.3f}) [flags: {flag_source}]")
+            avg_intensity = flagged_df['IntensityScore_Primary'].mean()
+            low_intensity = (flagged_df['IntensityScore_Primary'] < 0.7).sum()
+            print(f"  Avg intensity: {avg_intensity:.3f}  |  Low intensity (<0.7): {low_intensity} ({low_intensity/flagged*100:.1f}%) ⚠️")
     else:
         print("  ✓ No predictions flagged for review")
+
+def analyze_suicidal_ideation(df: pd.DataFrame):
+    """Analyze suicidal ideation detections."""
+    print_section("🚨 Suicidal Ideation Detection")
+    
+    if 'SuicidalIdeationFlag' not in df.columns:
+        print("  ℹ️  Suicidal ideation detection data not available")
+        return
+    
+    total = len(df)
+    detected = df['SuicidalIdeationFlag'].sum() if 'SuicidalIdeationFlag' in df.columns else 0
+    
+    if detected > 0:
+        print(f"  ⚠️  Detected: {detected} / {total} ({detected/total*100:.1f}%)")
+        print(f"  ⚠️  URGENT: These records require immediate human review")
+        
+        # Get detected records
+        detected_df = df[df['SuicidalIdeationFlag'] == True].copy()
+        
+        # Show pattern types if available
+        if 'SuicidalIdeationPattern' in detected_df.columns:
+            pattern_counts = detected_df['SuicidalIdeationPattern'].value_counts()
+            print(f"\n  Pattern types:")
+            for pattern, count in pattern_counts.items():
+                if pd.notna(pattern):
+                    print(f"    {pattern}: {count}")
+        
+        # Show confidence scores if available
+        if 'SuicidalIdeationConfidence' in detected_df.columns:
+            avg_confidence = detected_df['SuicidalIdeationConfidence'].mean()
+            min_confidence = detected_df['SuicidalIdeationConfidence'].min()
+            max_confidence = detected_df['SuicidalIdeationConfidence'].max()
+            print(f"\n  Confidence scores:")
+            print(f"    Average: {avg_confidence:.2f}  |  Range: [{min_confidence:.2f}, {max_confidence:.2f}]")
+        
+        # Show sample detections (with privacy considerations - truncated text)
+        print(f"\n  Sample detections (showing up to 3):")
+        for idx, row in detected_df.head(3).iterrows():
+            text = row.get('NormalizedText', 'N/A')[:50]
+            user_id = row.get('UserID', 'N/A')
+            timestamp = row.get('Timestamp', 'N/A')
+            pattern = row.get('SuicidalIdeationPattern', 'N/A')
+            confidence = row.get('SuicidalIdeationConfidence', 0.0)
+            print(f"    User: {user_id} | Pattern: {pattern} | Confidence: {confidence:.2f}")
+            print(f"    Text: '{text}...'")
+            print(f"    Timestamp: {timestamp}")
+    else:
+        print("  ✓ No suicidal ideation patterns detected")
 
 def analyze_user_patterns(df: pd.DataFrame):
     """Analyze patterns by user."""
@@ -265,21 +213,15 @@ def analyze_user_patterns(df: pd.DataFrame):
         return
     
     users = df['UserID'].unique()
-    print(f"\nTotal users: {len(users)}")
+    print(f"  Total users: {len(users)}")
     
-    for user_id in sorted(users):
-        user_df = df[df['UserID'] == user_id]
-        print(f"\n  User: {user_id} ({len(user_df)} records)")
-        
-        if 'PrimaryEmotionLabel' in user_df.columns:
-            emotions = user_df['PrimaryEmotionLabel'].value_counts()
-            print(f"    Top emotions:")
-            for emotion, count in emotions.head(3).items():
-                print(f"      {emotion}: {count}")
-        
-        if 'IntensityScore_Primary' in user_df.columns:
-            avg_intensity = user_df['IntensityScore_Primary'].mean()
-            print(f"    Avg intensity: {avg_intensity:.3f}")
+    if 'PrimaryEmotionLabel' in df.columns and 'IntensityScore_Primary' in df.columns:
+        user_stats = df.groupby('UserID').agg({
+            'PrimaryEmotionLabel': 'count',
+            'IntensityScore_Primary': 'mean'
+        }).rename(columns={'PrimaryEmotionLabel': 'records', 'IntensityScore_Primary': 'avg_intensity'})
+        print(f"  Records per user: {user_stats['records'].min()}-{user_stats['records'].max()} (avg: {user_stats['records'].mean():.1f})")
+        print(f"  Avg intensity per user: {user_stats['avg_intensity'].min():.3f}-{user_stats['avg_intensity'].max():.3f} (avg: {user_stats['avg_intensity'].mean():.3f})")
 
 def analyze_temporal_patterns(df: pd.DataFrame):
     """Analyze temporal patterns."""
@@ -292,52 +234,171 @@ def analyze_temporal_patterns(df: pd.DataFrame):
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     df = df.sort_values('Timestamp')
     
-    print(f"\nTime range:")
-    print(f"  Start: {df['Timestamp'].min()}")
-    print(f"  End:   {df['Timestamp'].max()}")
-    print(f"  Span:  {(df['Timestamp'].max() - df['Timestamp'].min()).days} days")
+    time_span = (df['Timestamp'].max() - df['Timestamp'].min()).days
+    print(f"  Time range: {df['Timestamp'].min().strftime('%Y-%m-%d')} to {df['Timestamp'].max().strftime('%Y-%m-%d')} ({time_span} days)")
     
-    # Daily distribution
     df['Date'] = df['Timestamp'].dt.date
-    daily_counts = df['Date'].value_counts().sort_index()
-    
-    print(f"\nDaily record counts:")
-    for date, count in daily_counts.items():
-        print(f"  {date}: {count} records")
+    daily_counts = df['Date'].value_counts()
+    print(f"  Records per day: {daily_counts.min()}-{daily_counts.max()} (avg: {daily_counts.mean():.1f})")
 
-def analyze_text_quality(df: pd.DataFrame):
-    """Analyze text quality and normalization."""
-    print_section("📝 Text Quality Analysis")
+
+def calculate_classification_metrics(df: pd.DataFrame, ground_truth_path: Path):
+    """Calculate accuracy, false positive, false negative metrics using ground truth labels."""
+    print_section("📊 Classification Metrics")
     
-    if 'NormalizedText' not in df.columns:
-        print("  ❌ No normalized text found")
+    # Load ground truth
+    try:
+        gt_df = pd.read_csv(ground_truth_path)
+        print(f"  Loaded {len(gt_df)} ground truth records")
+    except Exception as e:
+        print(f"  ❌ Error loading ground truth: {e}")
         return
     
-    if 'NormalizationFlags' not in df.columns:
-        print("  ❌ No normalization flags found")
+    # Check required columns
+    required_cols = ['UserID', 'Timestamp', 'TrueEmotionLabel']
+    missing = set(required_cols) - set(gt_df.columns)
+    if missing:
+        print(f"  ❌ Missing columns: {missing}")
         return
     
-    # Text length statistics
-    df['TextLength'] = df['NormalizedText'].str.len()
+    # Convert timestamps for matching
+    gt_df['Timestamp'] = pd.to_datetime(gt_df['Timestamp'])
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     
-    print(f"\nText length statistics:")
-    print(f"  Mean:   {df['TextLength'].mean():.1f} chars")
-    print(f"  Median: {df['TextLength'].median():.1f} chars")
-    print(f"  Min:    {df['TextLength'].min()} chars")
-    print(f"  Max:    {df['TextLength'].max()} chars")
+    # Merge predictions with ground truth on UserID and Timestamp
+    # Use a small time window for matching (within 1 second) in case of timestamp precision differences
+    merged_list = []
+    for _, gt_row in gt_df.iterrows():
+        # Find matching prediction
+        matches = df[
+            (df['UserID'] == gt_row['UserID']) &
+            (abs((df['Timestamp'] - gt_row['Timestamp']).dt.total_seconds()) < 1)
+        ]
+        if len(matches) > 0:
+            # Take the closest match
+            matches = matches.copy()
+            matches['time_diff'] = abs((matches['Timestamp'] - gt_row['Timestamp']).dt.total_seconds())
+            best_match = matches.loc[matches['time_diff'].idxmin()]
+            merged_row = best_match.to_dict()
+            merged_row['TrueEmotionLabel'] = gt_row['TrueEmotionLabel']
+            if 'TrueIntensity' in gt_df.columns:
+                merged_row['TrueIntensity'] = gt_row['TrueIntensity']
+            merged_list.append(merged_row)
     
-    # Normalization flags
-    flags = df['NormalizationFlags'].value_counts()
-    print(f"\nNormalization flags:")
-    for flag, count in flags.items():
-        if pd.notna(flag):
-            print(f"  {flag}: {count}")
+    if len(merged_list) == 0:
+        print("  ⚠️  No matching records found (check UserID/Timestamp)")
+        return
+    
+    merged = pd.DataFrame(merged_list)
+    
+    # Get predictions and true labels
+    y_pred = merged['PrimaryEmotionLabel'].fillna('').astype(str).tolist()
+    y_true = merged['TrueEmotionLabel'].fillna('').astype(str).tolist()
+    
+    # Filter out any empty labels
+    valid_mask = (pd.Series(y_pred) != '') & (pd.Series(y_true) != '')
+    merged_valid = merged[valid_mask].copy()
+    y_pred = merged_valid['PrimaryEmotionLabel'].fillna('').astype(str).tolist()
+    y_true = merged_valid['TrueEmotionLabel'].fillna('').astype(str).tolist()
+    
+    if len(y_pred) == 0:
+        print("  ⚠️  No valid labels found")
+        return
+    
+    print(f"  Evaluating {len(y_pred)} matched predictions")
+    
+    # Calculate overall metrics using MetricsTracker
+    tracker = MetricsTracker()
+    y_true_intensity = None
+    y_pred_intensity = None
+    
+    if 'TrueIntensity' in merged_valid.columns:
+        y_true_intensity = merged_valid['TrueIntensity'].fillna(0.0).tolist()
+    if 'IntensityScore_Primary' in merged_valid.columns:
+        y_pred_intensity = merged_valid['IntensityScore_Primary'].fillna(0.0).tolist()
+    
+    metrics = tracker.compute_metrics(
+        y_true=y_true,
+        y_pred=y_pred,
+        y_true_intensity=y_true_intensity,
+        y_pred_intensity=y_pred_intensity
+    )
+    
+    # Display overall metrics
+    print(f"\n  Overall Metrics:")
+    print(f"    Accuracy:  {metrics['accuracy']:.3f}  |  Precision: {metrics['precision_weighted']:.3f}  |  Recall: {metrics['recall_weighted']:.3f}  |  F1: {metrics['f1_weighted']:.3f}")
+    
+    # Display per-class metrics (top 5 by support)
+    if 'classification_report' in metrics:
+        report = metrics['classification_report']
+        emotion_scores = []
+        for emotion in sorted(set(y_true + y_pred)):
+            if emotion in report and isinstance(report[emotion], dict):
+                prec = report[emotion].get('precision', 0)
+                rec = report[emotion].get('recall', 0)
+                f1 = report[emotion].get('f1-score', 0)
+                supp = report[emotion].get('support', 0)
+                emotion_scores.append((emotion, prec, rec, f1, supp))
+        
+        if emotion_scores:
+            emotion_scores.sort(key=lambda x: x[4], reverse=True)  # Sort by support
+            print(f"\n  Per-Class (top 5):")
+            print(f"    {'Emotion':<12} {'Prec':<8} {'Rec':<8} {'F1':<8} {'Supp':<8}")
+            print(f"    {'-'*45}")
+            for emotion, prec, rec, f1, supp in emotion_scores[:5]:
+                print(f"    {emotion:<12} {prec:<8.3f} {rec:<8.3f} {f1:<8.3f} {supp:<8}")
+    
+    # Calculate false positive and false negative rates per emotion (top 5 by support)
+    all_emotions = sorted(set(y_true + y_pred))
+    emotion_fp_metrics = []
+    for emotion in all_emotions:
+        fp_metrics = tracker.track_false_positive_rate(
+            merged_valid,
+            true_labels_col='TrueEmotionLabel',
+            emotion=emotion
+        )
+        if fp_metrics and fp_metrics['true_positives'] + fp_metrics['false_negatives'] > 0:
+            emotion_fp_metrics.append((emotion, fp_metrics))
+    
+    if emotion_fp_metrics:
+        # Sort by total support (TP + FN)
+        emotion_fp_metrics.sort(key=lambda x: x[1]['true_positives'] + x[1]['false_negatives'], reverse=True)
+        print(f"\n  False Positive/Negative Rates (top 5):")
+        print(f"    {'Emotion':<12} {'TP':<6} {'FP':<6} {'FN':<6} {'FPR':<8} {'FNR':<8}")
+        print(f"    {'-'*50}")
+        for emotion, fp_metrics in emotion_fp_metrics[:5]:
+            print(f"    {emotion:<12} {fp_metrics['true_positives']:<6} {fp_metrics['false_positives']:<6} {fp_metrics['false_negatives']:<6} {fp_metrics['false_positive_rate']:<8.3f} {fp_metrics['false_negative_rate']:<8.3f}")
+    
+    # Display confusion matrix summary (top 5)
+    if 'confusion_matrix' in metrics and 'labels' in metrics:
+        cm = metrics['confusion_matrix']
+        labels = metrics['labels']
+        
+        # Show which emotions are most confused
+        confusion_pairs = []
+        for i, true_label in enumerate(labels):
+            for j, pred_label in enumerate(labels):
+                if i != j and cm[i][j] > 0:  # Not diagonal and has errors
+                    confusion_pairs.append((true_label, pred_label, cm[i][j]))
+        
+        if confusion_pairs:
+            confusion_pairs.sort(key=lambda x: x[2], reverse=True)
+            print(f"\n  Top Confusions (True → Predicted):")
+            for true_l, pred_l, count in confusion_pairs[:5]:
+                print(f"    {true_l} → {pred_l}: {count}")
+    
+    # Intensity metrics if available
+    if 'intensity_mse' in metrics:
+        print(f"\n  Intensity Metrics: MSE={metrics['intensity_mse']:.4f}, MAE={metrics['intensity_mae']:.4f}, R²={metrics['intensity_r2']:.4f}")
+    
+    print()
 
 def main():
     """Load and analyze results from database."""
     parser = argparse.ArgumentParser(description='Analyze Emotix pipeline results')
     parser.add_argument('--since', type=str, help='Only analyze records since this date (YYYY-MM-DD or days ago, e.g., "7" for last 7 days)')
     parser.add_argument('--db', type=str, help='Path to database file (default: data/mwb_log.db)')
+    parser.add_argument('--ground-truth', type=str, help='Path to CSV file with ground truth labels (columns: UserID, Timestamp, TrueEmotionLabel, optional: TrueIntensity)')
     args = parser.parse_args()
     
     print_section("🧠 Emotix Pipeline Results Analysis")
@@ -357,14 +418,12 @@ def main():
             # Try parsing as days ago
             days_ago = int(args.since)
             date_filter = (datetime.now() - timedelta(days=days_ago)).strftime('%Y-%m-%d %H:%M:%S')
-            print(f"\n📅 Filtering records since {days_ago} days ago ({date_filter})")
         except ValueError:
             # Try parsing as date string
             try:
                 date_filter = datetime.strptime(args.since, '%Y-%m-%d').strftime('%Y-%m-%d %H:%M:%S')
-                print(f"\n📅 Filtering records since {args.since}")
             except ValueError:
-                print(f"\n⚠️  Invalid date format: {args.since}. Use YYYY-MM-DD or number of days.")
+                print(f"⚠️  Invalid date format: {args.since}. Use YYYY-MM-DD or number of days.")
                 return 1
     
     # Load all results from database
@@ -381,7 +440,7 @@ def main():
             OriginalEmotionLabel, OriginalIntensityScore,
             AmbiguityFlag, NormalizationFlags,
             PostProcessingOverride, FlagForReview,
-            PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag
+            PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag, SuicidalIdeationFlag
         FROM mwb_log
     """
     
@@ -417,6 +476,8 @@ def main():
         df['AnomalyDetectionFlag'] = df['AnomalyDetectionFlag'].astype(bool)
     if 'HighConfidenceFlag' in df.columns:
         df['HighConfidenceFlag'] = df['HighConfidenceFlag'].astype(bool)
+    if 'SuicidalIdeationFlag' in df.columns:
+        df['SuicidalIdeationFlag'] = df['SuicidalIdeationFlag'].astype(bool)
     if 'FlagForReview' in df.columns:
         df['FlagForReview'] = df['FlagForReview'].astype(bool)
     if 'AmbiguityFlag' in df.columns:
@@ -439,13 +500,10 @@ def main():
             if none_original > 0:
                 old_records = max(old_records, none_original)
     
-    print(f"\n✓ Loaded {len(df)} records from database")
-    print(f"✓ Columns: {', '.join(df.columns)}")
+    print(f"✓ Loaded {len(df)} records from database")
     
     if old_records > 0 and not date_filter:
-        print(f"\n⚠️  Warning: {old_records} records appear to be from before recent fixes")
-        print(f"   (missing flag sources or OriginalEmotionLabel). Use --since to filter recent records.")
-        print(f"   Example: python analyze_results.py --since 7  # Last 7 days")
+        print(f"⚠️  Warning: {old_records} old records detected. Use --since 7 to filter recent records.")
     
     # Run all analyses
     analyze_emotion_distribution(df)
@@ -453,40 +511,19 @@ def main():
     analyze_post_processing(df)
     analyze_ambiguity(df)
     analyze_review_flags(df)
+    analyze_suicidal_ideation(df)
     analyze_user_patterns(df)
     analyze_temporal_patterns(df)
-    analyze_text_quality(df)
     
-    # Evaluation Metrics
-    print_section("📊 Evaluation Metrics")
-    tracker = MetricsTracker()
+    # Calculate classification metrics if ground truth provided
+    if args.ground_truth:
+        ground_truth_path = Path(args.ground_truth)
+        if ground_truth_path.exists():
+            calculate_classification_metrics(df, ground_truth_path)
+        else:
+            print(f"\n⚠️  Ground truth file not found: {ground_truth_path}")
+            print("   Skipping classification metrics calculation")
     
-    # Override effectiveness
-    override_metrics = tracker.track_override_effectiveness(df)
-    if override_metrics:
-        print(f"\nOverride Effectiveness:")
-        print(f"  Total overrides: {override_metrics.get('total_overrides', 0)}")
-        print(f"  Override rate: {override_metrics.get('override_rate', 0)*100:.1f}%")
-        if override_metrics.get('precision') is not None:
-            print(f"  Precision: {override_metrics['precision']:.3f}")
-            print(f"  Recall: {override_metrics['recall']:.3f}")
-    
-    # Calibration quality
-    calibration_metrics = tracker.track_calibration_quality(df)
-    if calibration_metrics:
-        print(f"\nCalibration Quality:")
-        print(f"  Mean intensity: {calibration_metrics.get('mean_intensity', 0):.3f}")
-        print(f"  High confidence (≥0.95): {calibration_metrics.get('high_confidence_rate', 0)*100:.1f}%")
-        if 'expected_calibration_error' in calibration_metrics:
-            print(f"  Expected Calibration Error (ECE): {calibration_metrics['expected_calibration_error']:.3f}")
-            print(f"    (Lower is better, <0.1 is well-calibrated)")
-    
-    # Emotion distribution tracking
-    dist_metrics = tracker.track_emotion_distribution(df)
-    if dist_metrics:
-        print(f"\nEmotion Distribution Tracking:")
-        print(f"  Total predictions: {dist_metrics.get('total_predictions', 0)}")
-        print(f"  Unique emotions: {len(dist_metrics.get('emotion_counts', {}))}")
     
     # Anomaly Detection
     print_section("🚨 User Anomaly Detection")
@@ -495,51 +532,17 @@ def main():
     
     if len(user_analysis) > 0:
         flagged_users = user_analysis[user_analysis['flag_for_review'] == True]
-        print(f"\nUsers flagged for review: {len(flagged_users)}")
+        print(f"  Flagged users: {len(flagged_users)} / {len(user_analysis)}")
         
         if len(flagged_users) > 0:
-            print("\nFlagged users:")
-            for _, user_row in flagged_users.iterrows():
-                print(f"\n  User: {user_row['user_id']}")
-                print(f"    Risk Level: {user_row['risk_level'].upper()}")
-                print(f"    Records: {user_row['total_records']}")
-                print(f"    Avg Intensity: {user_row['avg_intensity']:.3f}")
-                print(f"    Anomalies:")
-                for anomaly in user_row['anomalies']:
-                    print(f"      - {anomaly}")
+            risk_levels = flagged_users['risk_level'].value_counts()
+            risk_summary = ', '.join([f"{r}({c})" for r, c in risk_levels.items()])
+            print(f"  Risk levels: {risk_summary}")
         
         # Show all user risk levels
-        print(f"\nUser risk distribution:")
         risk_counts = user_analysis['risk_level'].value_counts()
-        for risk, count in risk_counts.items():
-            print(f"  {risk}: {count}")
-    
-    # Summary
-    print_section("✅ Analysis Complete")
-    print("\nKey insights:")
-    
-    if 'PrimaryEmotionLabel' in df.columns:
-        emotion_counts = df['PrimaryEmotionLabel'].value_counts()
-        top_emotion = emotion_counts.index[0]
-        print(f"  • Most common emotion: {top_emotion} ({emotion_counts[top_emotion]} occurrences)")
-    
-    if 'IntensityScore_Primary' in df.columns:
-        avg_intensity = df['IntensityScore_Primary'].mean()
-        print(f"  • Average intensity: {avg_intensity:.3f}")
-    
-    if 'AmbiguityFlag' in df.columns:
-        ambiguous_count = df['AmbiguityFlag'].sum()
-        print(f"  • Ambiguous predictions: {ambiguous_count} ({ambiguous_count/len(df)*100:.1f}%)")
-    
-    if 'PostProcessingOverride' in df.columns:
-        override_count = df['PostProcessingOverride'].notna().sum()
-        if override_count > 0:
-            print(f"  • Post-processing overrides: {override_count} ({override_count/len(df)*100:.1f}%)")
-    
-    if 'FlagForReview' in df.columns:
-        flagged_count = df['FlagForReview'].sum()
-        if flagged_count > 0:
-            print(f"  • Flagged for review: {flagged_count} ({flagged_count/len(df)*100:.1f}%)")
+        risk_dist = ', '.join([f"{r}({c})" for r, c in risk_counts.items()])
+        print(f"  Risk distribution: {risk_dist}")
     
     print()
     return 0

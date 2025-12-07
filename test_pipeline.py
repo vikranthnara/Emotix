@@ -104,6 +104,25 @@ def analyze_results(df: pd.DataFrame):
             print("  ✓ No predictions flagged for review")
     else:
         print("  No review flags found")
+    
+    print_subsection("🚨 Suicidal Ideation Detection")
+    if 'SuicidalIdeationFlag' in df.columns:
+        detected = df['SuicidalIdeationFlag'].sum()
+        if detected > 0:
+            print(f"\n  ⚠️  URGENT: {detected} record(s) with suicidal ideation patterns detected")
+            print(f"  ⚠️  These require immediate human review and crisis support")
+            detected_samples = df[df['SuicidalIdeationFlag'] == True]
+            for idx, row in detected_samples.head(3).iterrows():
+                text = row.get('NormalizedText', 'N/A')[:60]
+                user_id = row.get('UserID', 'N/A')
+                pattern = row.get('SuicidalIdeationPattern', 'N/A')
+                confidence = row.get('SuicidalIdeationConfidence', 0.0)
+                print(f"    - User: {user_id} | Pattern: {pattern} | Confidence: {confidence:.2f}")
+                print(f"      Text: '{text}...'")
+        else:
+            print("  ✓ No suicidal ideation patterns detected")
+    else:
+        print("  No suicidal ideation detection data available")
 
 def show_sample_predictions(df: pd.DataFrame, n: int = 5):
     """Show sample predictions with details."""
@@ -124,6 +143,8 @@ def show_sample_predictions(df: pd.DataFrame, n: int = 5):
             print(f"      ⚠️  Ambiguous")
         if 'FlagForReview' in row and row.get('FlagForReview', False):
             print(f"      🚩 Flagged for review")
+        if 'SuicidalIdeationFlag' in row and row.get('SuicidalIdeationFlag', False):
+            print(f"      🚨 URGENT: Suicidal ideation detected")
 
 def test_history_retrieval(persistence: MWBPersistence, user_ids: list):
     """Test history retrieval performance."""

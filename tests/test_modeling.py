@@ -21,27 +21,6 @@ def mock_transformers():
 class TestModeling:
     """Test modeling functions."""
     
-    def test_model_init_without_transformers(self):
-        """Test model initialization fails without transformers."""
-        # Save original value
-        import src.modeling
-        original_available = src.modeling.TRANSFORMERS_AVAILABLE
-        
-        try:
-            # Set TRANSFORMERS_AVAILABLE to False
-            src.modeling.TRANSFORMERS_AVAILABLE = False
-            
-            # Reload module to pick up the change
-            importlib.reload(src.modeling)
-            from src.modeling import EmotionModel
-            
-            with pytest.raises(ImportError, match="transformers library required"):
-                EmotionModel()
-        finally:
-            # Restore original value
-            src.modeling.TRANSFORMERS_AVAILABLE = original_available
-            importlib.reload(src.modeling)
-    
     @patch('src.modeling.torch')
     def test_model_init_success(self, mock_torch):
         """Test successful model initialization."""

@@ -58,6 +58,7 @@ class MWBPersistence:
                     PostProcessingReviewFlag INTEGER DEFAULT 0,
                     AnomalyDetectionFlag INTEGER DEFAULT 0,
                     HighConfidenceFlag INTEGER DEFAULT 0,
+                    SuicidalIdeationFlag INTEGER DEFAULT 0,
                     CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -153,6 +154,13 @@ class MWBPersistence:
                     ADD COLUMN HighConfidenceFlag INTEGER DEFAULT 0
                 """)
                 logger.info("Added HighConfidenceFlag column to mwb_log")
+            
+            if 'SuicidalIdeationFlag' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN SuicidalIdeationFlag INTEGER DEFAULT 0
+                """)
+                logger.info("Added SuicidalIdeationFlag column to mwb_log")
         except Exception as e:
             logger.warning(f"Schema migration warning (may be expected for new tables): {e}")
     
@@ -218,8 +226,8 @@ class MWBPersistence:
                              OriginalEmotionLabel, OriginalIntensityScore,
                              AmbiguityFlag, NormalizationFlags,
                              PostProcessingOverride, FlagForReview,
-                             PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag, SuicidalIdeationFlag)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             str(row['UserID']),
                             timestamp_str,
@@ -234,7 +242,8 @@ class MWBPersistence:
                             int(row.get('FlagForReview', 0)),
                             int(row.get('PostProcessingReviewFlag', 0)),
                             int(row.get('AnomalyDetectionFlag', 0)),
-                            int(row.get('HighConfidenceFlag', 0))
+                            int(row.get('HighConfidenceFlag', 0)),
+                            int(row.get('SuicidalIdeationFlag', 0))
                         ))
                     
                     # Commit batch
@@ -278,7 +287,7 @@ class MWBPersistence:
                        OriginalEmotionLabel, OriginalIntensityScore,
                        AmbiguityFlag, NormalizationFlags,
                        PostProcessingOverride, FlagForReview,
-                       PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag
+                       PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag, SuicidalIdeationFlag
                 FROM mwb_log
                 WHERE UserID = ?
             """

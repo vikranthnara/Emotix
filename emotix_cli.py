@@ -22,6 +22,7 @@ from src.persistence import MWBPersistence
 from src.utils import setup_logging
 from src.postprocess import EmotionPostProcessor
 from src.utils import get_emotion_sentiment
+from src.suicidal_detection import SuicidalIdeationDetector
 
 
 def process_single_entry(
@@ -32,6 +33,7 @@ def process_single_entry(
     preprocessor,
     model: EmotionModel,
     postprocessor: EmotionPostProcessor,
+    suicidal_detector: SuicidalIdeationDetector,
     slang_dict_path: Path = None
 ) -> dict:
     """
@@ -89,6 +91,15 @@ def process_single_entry(
     df['OriginalEmotionLabel'] = row['PrimaryEmotionLabel']
     df['OriginalIntensityScore'] = row['IntensityScore_Primary']
     
+    # Step 4.5: Suicidal Ideation Detection
+    is_detected, confidence, pattern_type = suicidal_detector.process_text(
+        original_text, user_id=user_id, timestamp=timestamp
+    )
+    df['SuicidalIdeationFlag'] = is_detected
+    df['SuicidalIdeationConfidence'] = confidence
+    df['SuicidalIdeationPattern'] = pattern_type
+    df['FlagForReview'] = is_detected  # Always flag for review if detected
+    
     # Step 5: Persistence
     persistence.write_results(df, archive_raw=True)
     
@@ -99,7 +110,10 @@ def process_single_entry(
         'intensity': corrected_intensity,
         'original_emotion': row['PrimaryEmotionLabel'],
         'was_overridden': was_overridden,
-        'override_type': override_type
+        'override_type': override_type,
+        'suicidal_detected': is_detected,
+        'suicidal_pattern': pattern_type,
+        'suicidal_confidence': confidence
     }
 
 
@@ -132,6 +146,8 @@ def print_result(result: dict):
         original_sentiment_str = f" {original_sentiment}" if original_sentiment else ""
         new_sentiment_str = f" {sentiment}" if sentiment else ""
         print(f"  ⚡ Override: {original_emotion}{original_sentiment_str} → {emotion}{new_sentiment_str} (via {result['override_type']})")
+    if result.get('suicidal_detected', False):
+        print(f"  🚨 URGENT: Suicidal ideation detected (pattern: {result.get('suicidal_pattern', 'N/A')}, confidence: {result.get('suicidal_confidence', 0.0):.2f})")
 
 
 def interactive_loop(
@@ -156,6 +172,7 @@ def interactive_loop(
     model = EmotionModel(model_name=model_name, temperature=1.5)
     
     postprocessor = EmotionPostProcessor()
+    suicidal_detector = SuicidalIdeationDetector()
     
     print("✓ Pipeline ready!\n")
     
@@ -210,6 +227,7 @@ def interactive_loop(
                     preprocessor=preprocessor,
                     model=model,
                     postprocessor=postprocessor,
+                    suicidal_detector=suicidal_detector,
                     slang_dict_path=slang_dict_path
                 )
                 

@@ -1,13 +1,13 @@
 # Emotix: Mental Well-Being Tracking Pipeline
 
-A multi-layer NLP pipeline for longitudinal Mental Well-Being (MWB) tracking from raw conversational text. Phase 1 implements Ingestion, Preprocessing, and Persistence layers with Pandas DataFrames as canonical interchange format.
+A multi-layer NLP pipeline for longitudinal Mental Well-Being (MWB) tracking from raw conversational text. The pipeline processes noisy conversational data through ingestion, preprocessing, contextualization, emotion modeling, and persistence layers.
 
 ## Architecture Overview
 
 The pipeline consists of 5 layers:
 
-1. **Layer 1: Ingestion** - Accepts raw CSV/JSON lines, validates, and converts to canonical `pd.DataFrame` format
-2. **Layer 2: Preprocessing** - Normalizes slang/abbreviations, demojizes, applies minimal syntactic fixes, preserves stopwords
+1. **Layer 1: Ingestion** - Accepts raw CSV/JSON, validates, and converts to canonical `pd.DataFrame` format
+2. **Layer 2: Preprocessing** - Normalizes slang/abbreviations, demojizes, applies syntactic fixes, preserves stopwords
 3. **Layer 3: Contextualization** - Multi-turn retrieval and sequence formatting for context-aware inference
 4. **Layer 4: Modeling** - Emotion classification and intensity prediction using transformer models
 5. **Layer 5: Persistence** - Two-tier storage (raw archive + structured SQLite MWB Log)
@@ -23,35 +23,248 @@ Raw Text (CSV/JSON)
   → [Persistence] → SQLite (mwb_log + raw_archive tables)
 ```
 
-## Project Structure
+## Layer-by-Layer Architecture
 
+### Layer 1: Ingestion
+
+**Purpose**: Accepts raw data from multiple formats and converts to a standardized DataFrame format.
+
+**Key Features**:
+- **Multi-format Support**: Handles CSV, JSON, and JSON Lines formats
+- **Flexible Column Mapping**: Automatically detects and maps common column name variations (e.g., `user_id`, `UserID`, `user` → `UserID`)
+- **Data Validation**: 
+  - Ensures required columns exist: `UserID`, `Text`, `Timestamp`
+  - Validates no null values in required fields
+  - Converts timestamps to datetime format (handles ISO 8601, SQL format, Unix timestamps)
+  - Type coercion for UserID and Text columns
+- **Error Handling**: Provides clear error messages for missing columns or invalid data
+
+**Output**: Standardized DataFrame with columns: `UserID` (string), `Text` (string), `Timestamp` (datetime)
+
+**Example**:
+```python
+from src.ingest import ingest_csv
+
+df = ingest_csv("data/sample_data.csv")
+# Returns DataFrame with UserID, Text, Timestamp columns
 ```
-Emotix/
-├── src/
-│   ├── __init__.py
-│   ├── ingest.py          # Layer 1: Ingestion
-│   ├── preprocess.py      # Layer 2: Preprocessing
-│   ├── contextualize.py   # Layer 3: Contextualization
-│   ├── modeling.py        # Layer 4: Emotion Modeling
-│   ├── persistence.py     # Layer 5: Persistence
-│   ├── validation.py      # Validation and metrics
-│   ├── pipeline.py        # Complete pipeline integration
-│   └── utils.py           # Logging and checkpointing utilities
-├── tests/
-│   ├── test_ingest.py
-│   ├── test_preprocess.py
-│   └── test_persistence.py
-├── notebooks/
-│   └── phase1_demo.ipynb  # End-to-end demo
-├── data/
-│   ├── slang_dictionary.json  # Slang/abbrev mappings
-│   ├── sample_data.csv        # Sample noisy chat data
-│   └── mwb_log.db             # SQLite database (created on first run)
-├── checkpoints/               # Parquet checkpoints (created on run)
-├── requirements.txt
-├── setup.py
-└── README.md
+
+### Layer 2: Preprocessing
+
+**Purpose**: Normalizes conversational text to improve model accuracy while preserving semantic meaning.
+
+**Key Features**:
+- **Slang Normalization**: 
+  - Dictionary-based lookup for common abbreviations (e.g., "lol" → "laughing out loud")
+  - Fuzzy matching fallback for typos and variations
+  - Prevents false matches (e.g., "am" won't match "ama")
+- **Emoji Demojization**: Converts emojis to text descriptions (e.g., 😊 → ":smiling_face:")
+- **Syntactic Fixes**: Handles common typos and spacing issues
+- **Stopword Preservation**: Keeps stopwords by default (configurable) to maintain context
+- **Flag Tracking**: Records all transformations in `NormalizationFlags` JSON column for auditability
+
+**Output**: DataFrame with added columns: `NormalizedText` (string), `NormalizationFlags` (JSON dict)
+
+**Example**:
+```python
+from src.preprocess import Preprocessor
+
+preprocessor = Preprocessor(slang_dict_path="data/slang_dictionary.json")
+normalized, flags = preprocessor.preprocess_text("lol that's great 😊")
+# Returns: ("laughing out loud that's great :smiling_face:", {...})
 ```
+
+### Layer 3: Contextualization
+
+**Purpose**: Retrieves conversation history and formats sequences for context-aware emotion classification.
+
+**Key Features**:
+- **History Retrieval**: Fast indexed queries (<100ms) to fetch previous user entries from database
+- **Context Selection Strategies**:
+  - **RecentContextStrategy**: Most recent N turns (default)
+  - **SameDayContextStrategy**: Only same-day context (good for journaling)
+  - **EmotionalContextStrategy**: Filters out neutral context
+  - **WeightedContextStrategy**: Weights context by recency
+- **Sequence Formatting**: Multiple format types:
+  - `standard`: `"utterance [SEP] context"` (default)
+  - `reverse`: `"context [SEP] utterance"`
+  - `weighted`: `"utterance [SEP] utterance context"` (repeats utterance for emphasis)
+  - `concatenated`: `"utterance context"` (no separator)
+- **Batch Processing**: Efficient batch fetching to avoid N+1 query problems
+- **Temporal Filtering**: Only includes history before current timestamp to prevent data leakage
+
+**Output**: DataFrame with added column: `Sequence` (string) containing formatted context-aware input
+
+**Example**:
+```python
+from src.contextualize import create_sequences_batch
+from src.persistence import MWBPersistence
+
+persistence = MWBPersistence("data/mwb_log.db")
+df = create_sequences_batch(df, persistence, max_context_turns=5)
+# Adds 'Sequence' column with context-aware formatted text
+```
+
+### Layer 4: Modeling
+
+**Purpose**: Emotion classification and intensity prediction using transformer models.
+
+**Key Features**:
+- **Model**: Pre-trained `j-hartmann/emotion-english-distilroberta-base` (DistilRoBERTa)
+- **Emotion Classes**: 7 emotions (joy, sadness, anger, fear, surprise, disgust, neutral)
+- **Intensity Prediction**: Softmax probabilities provide intensity scores (0.0-1.0)
+- **Confidence Calibration**: Temperature scaling (default: 1.5) to reduce overconfidence
+- **Ambiguity Detection**: Identifies low-confidence predictions that may need review
+- **Batch Inference**: Efficient batch processing for multiple texts
+- **Context-Aware Input**: Uses sequences from Layer 3 that include conversation history
+
+**Output**: DataFrame with added columns: `PrimaryEmotionLabel` (string), `IntensityScore_Primary` (float), `AmbiguityFlag` (boolean)
+
+**Example**:
+```python
+from src.modeling import EmotionModel, run_inference_pipeline
+
+model = EmotionModel(temperature=1.5)
+df = run_inference_pipeline(df, model)
+# Adds emotion labels and intensity scores
+```
+
+### Layer 5: Persistence
+
+**Purpose**: Two-tier storage system for audit trail and queryable structured data.
+
+**Key Features**:
+- **Two-Tier Architecture**:
+  - `raw_archive`: Immutable audit trail of original input (data lake pattern)
+  - `mwb_log`: Structured, indexed results for fast queries
+- **ACID Transactions**: Batch writes with rollback on errors
+- **Fast Queries**: Composite index on `(UserID, Timestamp)` enables <100ms history retrieval
+- **Schema Migration**: Automatic schema evolution without data loss
+- **Comprehensive Schema**: Stores original predictions, post-processed results, flags, and metadata
+
+**Output**: Data persisted to SQLite database with both raw archive and structured log tables
+
+**Example**:
+```python
+from src.persistence import MWBPersistence
+
+persistence = MWBPersistence("data/mwb_log.db")
+persistence.write_results(df, archive_raw=True)
+history = persistence.fetch_history("user001", limit=10)
+```
+
+## Context-Aware System Design
+
+### Overview
+
+The Emotix pipeline is designed to be **context-aware**, meaning it uses conversation history to improve emotion classification accuracy. This is critical for mental well-being tracking because emotions are often expressed ambiguously and require context to interpret correctly.
+
+### How Context-Awareness Works
+
+**1. History Retrieval (Layer 3)**
+- When processing a new text entry, the system queries the database for that user's previous entries
+- Uses indexed queries on `(UserID, Timestamp)` for fast retrieval (<100ms)
+- Only includes history **before** the current timestamp to prevent data leakage
+- Retrieves up to N previous turns (configurable, default: 5)
+
+**2. Context Selection Strategies**
+
+The system provides multiple strategies for selecting relevant context:
+
+- **RecentContextStrategy** (Default): Selects the most recent N turns
+  - Best for: Real-time conversations where recent context is most relevant
+  - Example: "I'm fine" after "I'm feeling terrible" → sadness (not neutral)
+
+- **SameDayContextStrategy**: Only includes context from the same day
+  - Best for: Daily journaling where each day is independent
+  - Example: Morning entry doesn't use context from previous day
+
+- **EmotionalContextStrategy**: Filters out neutral/low-intensity entries
+  - Best for: Focusing on emotional transitions
+  - Example: Only uses entries with clear emotions (intensity ≥ 0.5)
+
+- **WeightedContextStrategy**: Weights context by recency
+  - Best for: Balancing recent and historical context
+  - Example: Recent entries get higher weight than older ones
+
+**3. Sequence Formatting**
+
+The selected context is formatted into a sequence that the model can process:
+
+- **Standard Format**: `"current utterance [SEP] context"`
+  - Current utterance comes first (most prominent)
+  - Context provides background information
+  - Example: `"I'm fine [SEP] I'm feeling terrible today nothing is working"`
+
+- **Reverse Format**: `"context [SEP] current utterance"`
+  - Context comes first, then current utterance
+  - Useful when context is more important than current text
+
+- **Weighted Format**: `"current utterance [SEP] current utterance context"`
+  - Repeats current utterance for emphasis
+  - Ensures model focuses on current text while having context
+
+**4. Model Processing**
+
+The transformer model processes the context-aware sequence:
+- The model sees both the current utterance and historical context
+- This enables it to resolve ambiguities (e.g., "I'm fine" can mean different things based on context)
+- Context helps distinguish between similar phrases with different emotional meanings
+
+### Impact of Context-Awareness
+
+**Accuracy Improvement**:
+- Resolves ambiguous phrases: "I'm fine" → sadness (when context is negative) vs. neutral (when context is positive)
+- Captures emotional transitions: Detects when emotions change over time
+- Reduces false positives: Context helps distinguish sarcasm from genuine statements
+
+**Example Scenarios**:
+
+1. **Ambiguous "I'm fine"**:
+   - Without context: Often classified as neutral (low confidence)
+   - With context ("I'm feeling terrible" → "I'm fine"): Classified as sadness (higher confidence)
+
+2. **Emotional Transitions**:
+   - Context: "I'm so sad" → "Feeling better now"
+   - Without context: "Feeling better now" → joy (0.72)
+   - With context: "Feeling better now" → joy (0.85) - higher confidence due to positive transition
+
+3. **Sarcasm Detection**:
+   - Context: Multiple positive entries → "Oh great, another problem"
+   - Without context: May be classified as joy
+   - With context: Correctly flagged for review (sarcasm pattern)
+
+### Technical Implementation
+
+**Database Integration**:
+- History is stored in SQLite with composite indexes for fast retrieval
+- Batch fetching prevents N+1 query problems
+- Temporal filtering ensures no future data leakage
+
+**Sequence Construction**:
+```python
+# Example sequence creation
+utterance = "I'm fine"
+history = [
+    "I'm feeling terrible today",
+    "Nothing is working for me"
+]
+sequence = "I'm fine [SEP] I'm feeling terrible today Nothing is working for me"
+```
+
+**Model Input**:
+- The sequence is tokenized and fed to the transformer model
+- Model processes the entire sequence (utterance + context) together
+- Output includes emotion label and intensity score
+
+### Performance Considerations
+
+- **Query Optimization**: Composite indexes enable <100ms history retrieval
+- **Batch Processing**: Batch fetching reduces database round trips
+- **Sequence Length**: Truncation at 512 tokens to fit model limits
+- **Context Window**: Configurable (default: 5 turns) to balance accuracy and performance
+
+This context-aware design significantly improves emotion classification accuracy, especially for ambiguous or context-dependent expressions common in mental well-being tracking.
 
 ## Installation
 
@@ -64,7 +277,7 @@ Emotix/
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/vikranthnara/Emotix.git
 cd Emotix
 ```
 
@@ -82,25 +295,359 @@ pip install -e .
 
 ### Run the Demo Notebooks
 
-**Phase 1 Demo:**
-```bash
-jupyter notebook notebooks/phase1_demo.ipynb
-```
-
 **Phase 2 Demo (Complete Pipeline):**
 ```bash
 jupyter notebook notebooks/phase2_demo.ipynb
 ```
 
-The Phase 2 notebook demonstrates:
-- Complete 5-layer pipeline
-- Emotion classification and intensity prediction
-- Contextualization with multi-turn sequences
-- Ambiguity detection
-- Synthetic validation dataset
+### Interactive CLI
 
-### Run Unit Tests
+**Run the interactive CLI:**
+```bash
+python emotix_cli.py --user user001
+```
 
+The CLI processes text entries through the full pipeline and displays emotion predictions with context summaries.
+
+**Commands:**
+- Type any text and press Enter to process it
+- `summary` - Show summary of last 3 entries
+- `history` - Show full history (last 10 entries)
+- `exit` or `quit` - Exit the program
+
+### Programmatic Usage
+
+**Complete Pipeline:**
+```python
+from src.pipeline import run_full_pipeline
+
+df_results = run_full_pipeline(
+    input_path="data/sample_data.csv",
+    db_path="data/mwb_log.db",
+    slang_dict_path="data/slang_dictionary.json",
+    model_name="j-hartmann/emotion-english-distilroberta-base",
+    temperature=1.5
+)
+```
+
+## Technical Decisions & Rationale
+
+### Model Selection
+
+**Selected Model:** `j-hartmann/emotion-english-distilroberta-base`
+
+**Rationale:**
+- **DistilRoBERTa Architecture**: 40% faster than RoBERTa-base while maintaining 97% of performance
+- **Pre-trained for Emotion**: Fine-tuned specifically for emotion classification (not general sentiment)
+- **Resource Efficiency**: Runs on CPU with acceptable latency (<500ms per inference)
+- **Intensity Support**: Softmax probabilities provide natural intensity scores (0.0-1.0)
+- **Hugging Face Integration**: Well-maintained, actively updated model
+
+**Alternative Models Considered:**
+- **RoBERTa-base**: More accurate but 40% slower and 2x memory usage
+- **BERT-base**: Older architecture, less efficient, lower accuracy on emotion tasks
+- **cardiffnlp/twitter-roberta-base-emotion**: Twitter-specific, may not generalize to journaling
+
+### Architecture Decisions
+
+**5-Layer Pipeline Design:**
+- **Separation of Concerns**: Each layer has a single, well-defined responsibility
+- **DataFrame Interchange**: Pandas DataFrames as canonical format enables easy debugging, checkpointing, and integration with data science tools
+- **Two-Tier Persistence**: 
+  - `raw_archive`: Immutable audit trail of original input
+  - `mwb_log`: Structured, queryable results for analysis
+- **Context-Aware Processing**: Multi-turn sequences enable understanding of conversational flow
+
+**Confidence Calibration:**
+- **Problem**: Initial model showed overconfidence (intensity >0.95 for many predictions)
+- **Solution**: Temperature scaling (default: 1.5) to reduce overconfidence
+- **Result**: More realistic confidence scores, better flagging of high-confidence predictions
+
+**Post-Processing Strategy:**
+- **Problem**: Model misclassified obvious positive emotions (gratitude → sadness, progress → neutral)
+- **Solution**: Rule-based post-processing with override validation
+- **Validation**: Overrides only applied when label actually changes (prevents false positives)
+- **Impact**: Post-processing corrects ~25% of misclassifications in test data
+
+### Library Choices
+
+**Pandas**: Chosen for DataFrame operations due to:
+- Standard data science tool with rich functionality
+- Easy integration with SQLite and Parquet checkpoints
+- Supports future migration to Bodo for parallel processing
+
+**SQLite**: Chosen for persistence due to:
+- Zero-configuration database suitable for Phase 1
+- ACID-compliant transactions
+- Fast indexed queries (<100ms requirement met)
+- Easy migration path to PostgreSQL for production
+
+**Transformers (Hugging Face)**: Chosen for modeling due to:
+- Industry-standard library for transformer models
+- Easy model loading and inference
+- Active maintenance and community support
+- Supports multiple model architectures
+
+## Methodology
+
+### Tools Used
+
+1. **Emotion Classification Model**: `j-hartmann/emotion-english-distilroberta-base`
+   - Pre-trained DistilRoBERTa model fine-tuned for emotion classification
+   - Supports 7 emotions: joy, sadness, anger, fear, surprise, disgust, neutral
+   - Intensity prediction via softmax probabilities
+
+2. **Preprocessing Tools**:
+   - `emoji` library: Converts emojis to text descriptions (demojization)
+   - Custom slang dictionary: Normalizes abbreviations and slang terms
+   - Fuzzy string matching: Handles typos and variations in slang
+
+3. **Contextualization**:
+   - SQLite database: Stores and retrieves conversation history
+   - Composite indexing: Enables fast history retrieval (<100ms)
+   - Multiple context strategies: Recent, SameDay, Emotional, Weighted
+
+4. **Post-Processing**:
+   - Rule-based pattern matching: Corrects common misclassifications
+   - Context-aware validation: Validates overrides against conversation history
+   - Anomaly detection: Identifies high-risk user patterns
+
+5. **Crisis Detection**:
+   - Suicidal ideation detection: Pattern-based detection with multiple confidence levels
+   - Real-time crisis support: Immediate display of help resources when detected
+   - False positive prevention: Context-aware validation to reduce false alarms
+
+6. **Validation & Testing**:
+   - pytest: Unit testing framework (104 tests across 9 test files)
+   - Synthetic data generation: Creates diverse test cases for validation
+   - Metrics tracking: Precision, recall, F1-score, intensity correlation
+
+### Verification of Output
+
+**Model Output Verification:**
+- Verified emotion labels match model's supported classes (7 emotions)
+- Validated intensity scores are in valid range (0.0-1.0)
+- Tested ambiguity detection on known ambiguous phrases
+- Compared predictions with and without context to measure improvement
+
+**Preprocessing Verification:**
+- Tested slang normalization on 30+ common abbreviations
+- Verified emoji demojization preserves semantic meaning
+- Validated that stopwords are preserved (configurable)
+- Tested fuzzy matching prevents false positives (e.g., "am" not matching "ama")
+
+**Post-Processing Verification:**
+- Validated overrides only apply when label actually changes
+- Tested pattern matching on positive keywords, gratitude, progress indicators
+- Verified context-aware validation prevents inappropriate overrides
+- Measured accuracy improvement (~25% correction rate on test data)
+
+**Persistence Verification:**
+- Validated transaction safety (rollback on errors)
+- Tested history retrieval performance (<100ms requirement)
+- Verified schema migration handles new columns gracefully
+- Confirmed two-tier storage (raw_archive + mwb_log) maintains data integrity
+
+**Testing Coverage:**
+- 104 unit tests across all layers
+- Integration tests for complete pipeline
+- Performance tests for history retrieval
+- Synthetic data validation with known ground truth
+
+### Synthetic Dataset Generation
+
+**AI-Assisted Dataset Creation:**
+We leveraged AI tools (ChatGPT) to generate a comprehensive synthetic dataset for pipeline validation and evaluation. The synthetic data generation process involved:
+
+- **Dataset Size**: 500 records across 10 users
+- **Diversity**: Includes all 7 emotion classes (joy, sadness, anger, fear, surprise, disgust, neutral)
+- **Test Cases**: Covers positive examples (gratitude, humor, progress), negative examples (high-intensity emotions), ambiguous cases, sarcasm, and context-dependent scenarios
+- **Temporal Distribution**: Records span 7 days with realistic timestamps
+- **Ground Truth**: Pattern-based mapping to expected emotions for evaluation
+
+The synthetic dataset (`data/synthetic_data_large.csv`) was generated using `generate_synthetic_data.py` and validated against ground truth labels (`data/ground_truth_large.csv`) created via pattern matching rules. This dataset enables comprehensive evaluation of the pipeline's performance across diverse emotion classification scenarios.
+
+### Performance Metrics
+
+**Overall Performance (500-record synthetic dataset):**
+- **Accuracy**: 0.712
+- **Precision**: 0.740
+- **Recall**: 0.712
+- **F1-Score**: 0.718
+
+**Per-Class Performance (Top 5 Emotions):**
+
+| Emotion  | Precision | Recall | F1-Score | Support |
+|----------|-----------|--------|----------|---------|
+| joy      | 0.863     | 0.760  | 0.808    | 183     |
+| neutral  | 0.637     | 0.760  | 0.693    | 104     |
+| sadness  | 0.683     | 0.589  | 0.633    | 95      |
+| fear     | 0.828     | 0.716  | 0.768    | 74      |
+| anger    | 0.864     | 0.950  | 0.905    | 20      |
+
+**False Positive/Negative Rates (Top 5):**
+
+| Emotion  | TP   | FP  | FN  | FPR    | FNR    |
+|----------|------|-----|-----|--------|--------|
+| joy      | 139  | 22  | 44  | 0.069  | 0.240  |
+| neutral  | 79   | 45  | 25  | 0.114  | 0.240  |
+| sadness  | 56   | 26  | 39  | 0.064  | 0.411  |
+| fear     | 53   | 11  | 21  | 0.026  | 0.284  |
+| anger    | 19   | 3   | 1   | 0.006  | 0.050  |
+
+**Top Confusion Patterns:**
+- sadness → surprise: 33 cases
+- joy → neutral: 30 cases
+- fear → sadness: 16 cases
+- neutral → joy: 14 cases
+- disgust → neutral: 12 cases
+
+These metrics demonstrate the pipeline's effectiveness in emotion classification, with particularly strong performance on joy and anger detection. The confusion patterns highlight areas for improvement, particularly in distinguishing between sadness and surprise, and handling neutral emotions.
+
+## AI Disclosure
+
+This project was developed with the assistance of AI tools including ChatGPT and GitHub Copilot. AI assistance was used for:
+- Code generation and refactoring
+- Documentation writing and editing
+- Debugging and error resolution
+- Code review and optimization suggestions
+- **Synthetic dataset generation**: Leveraged ChatGPT to generate diverse test cases and patterns for the 500-record synthetic dataset used for pipeline evaluation
+
+All technical decisions, architecture choices, and implementation details were reviewed and validated by the developer. The final codebase, test suite, and documentation represent the developer's understanding and implementation of the system.
+
+## Project Structure
+
+```
+Emotix/
+├── src/
+│   ├── ingest.py          # Layer 1: Ingestion
+│   ├── preprocess.py      # Layer 2: Preprocessing
+│   ├── contextualize.py   # Layer 3: Contextualization
+│   ├── modeling.py        # Layer 4: Emotion Modeling
+│   ├── persistence.py     # Layer 5: Persistence
+│   ├── postprocess.py     # Post-processing rules
+│   ├── suicidal_detection.py  # Crisis detection and support
+│   ├── pipeline.py        # Complete pipeline integration
+│   └── utils.py           # Utilities
+├── tests/                 # Unit tests
+├── notebooks/             # Demo notebooks
+├── data/                  # Sample data and slang dictionary
+└── requirements.txt
+```
+
+## Key Features
+
+- **Handles Messy Data**: Normalizes slang, emojis, typos, and inconsistent formatting
+- **Context-Aware**: Uses conversation history to improve emotion classification
+- **Rule-Based Corrections**: Post-processing corrects common misclassifications
+- **Anomaly Detection**: Identifies high-risk user patterns automatically
+- **Suicidal Ideation Detection**: Real-time detection of crisis indicators with immediate help resources
+- **Fast Queries**: History retrieval under 100ms with indexed database
+- **Two-Tier Storage**: Immutable raw archive + structured queryable log
+
+## Suicidal Ideation Detection
+
+### Overview
+
+The pipeline includes a critical safety feature for detecting suicidal ideation patterns in user text. This feature operates as an additional layer (Step 4.5) after emotion modeling and before persistence, providing immediate crisis support resources when concerning patterns are detected.
+
+### How It Works
+
+The `SuicidalIdeationDetector` uses pattern-based detection with multiple confidence levels:
+
+1. **Direct Patterns** (Confidence: 0.95)
+   - Explicit statements: "I want to die", "I'm going to kill myself", "I need to end my life"
+   - Suicide-related terms: "commit suicide", "take my life", "ending it all"
+   - Future tense variations: "I'll kill myself", "I'm going to end it"
+
+2. **Planning Patterns** (Confidence: 0.90)
+   - Active planning language: "thinking about ending it", "planning to kill myself"
+   - Method-specific indicators: "have pills", "have a gun", "everything is ready"
+   - Time-specific indicators: "tonight", "today", "this week"
+
+3. **Goodbye Patterns** (Confidence: 0.90)
+   - Final messages: "goodbye forever", "this is my last message", "tell everyone I love them"
+   - Farewell statements in context of crisis indicators
+
+4. **Indirect Patterns** (Confidence: 0.80)
+   - Worthlessness: "not worth living", "life isn't worth it", "I'm a burden"
+   - Burden on others: "everyone would be better without me", "no one would miss me"
+   - Pointlessness: "no point", "nothing matters", "no reason to live"
+   - Self-hatred: "hate myself", "hate my life", "I'm terrible"
+
+5. **Hopelessness Patterns** (Confidence: 0.75)
+   - No hope: "hopeless", "nothing will change", "never get better"
+   - Trapped feelings: "no way out", "trapped", "no escape"
+   - Giving up: "giving up", "done trying", "can't fight anymore"
+
+6. **Multiple Indicators** (Confidence: 0.70)
+   - Safety net: Detects when multiple concerning keywords appear together
+   - Catches combinations that might not match specific patterns
+
+### False Positive Prevention
+
+The detector includes safeguards to reduce false positives:
+- Excludes common phrases: "I could kill for a pizza", "I'm dying to see that"
+- Context-aware detection: Ambiguous phrases like "I'm done" only trigger with additional concerning context
+- Pattern validation: Requires specific linguistic structures, not just keyword presence
+
+### Integration & Impact
+
+**Pipeline Integration:**
+- Runs automatically after emotion modeling (Step 4.5)
+- Analyzes original text (before normalization) to preserve semantic meaning
+- Adds three columns to the DataFrame:
+  - `SuicidalIdeationFlag`: Boolean indicating detection
+  - `SuicidalIdeationConfidence`: Confidence score (0.0-1.0)
+  - `SuicidalIdeationPattern`: Type of pattern detected
+
+**Automatic Flagging:**
+- Any detected suicidal ideation automatically sets `FlagForReview = True`
+- Logs warnings with user ID and timestamp for audit trail
+- Immediately displays crisis support resources to the user
+
+**Crisis Support Resources:**
+When detection occurs, the system immediately displays:
+- 24/7 emergency contact information
+- International crisis resources (IASP, Befrienders Worldwide)
+- Crisis Text Line information
+- Encouraging message emphasizing that help is available
+
+**Impact:**
+- **Immediate Response**: Provides crisis resources instantly when concerning patterns are detected
+- **Early Intervention**: Catches both explicit and indirect expressions of suicidal ideation
+- **Comprehensive Coverage**: Detects patterns across multiple linguistic styles and variations
+- **Privacy-Preserving**: Operates locally without external API calls
+- **Audit Trail**: Logs all detections with user context for follow-up care
+
+**Clinical Considerations:**
+- This is a screening tool, not a diagnostic tool
+- All detections should be reviewed by mental health professionals
+- High-confidence detections (≥0.90) require immediate human review
+- The system prioritizes sensitivity (catching true cases) over specificity (avoiding false positives) for safety
+
+### Usage Example
+
+```python
+from src.suicidal_detection import SuicidalIdeationDetector
+
+detector = SuicidalIdeationDetector()
+is_detected, confidence, pattern_type = detector.process_text(
+    "I don't want to live anymore",
+    user_id="user001",
+    timestamp=datetime.now()
+)
+
+if is_detected:
+    print(f"Detected: {pattern_type} (confidence: {confidence:.2f})")
+    # Help message is automatically displayed
+```
+
+The detector is automatically integrated into the full pipeline and CLI, providing seamless crisis detection for all processed text entries.
+
+## Testing
+
+Run unit tests:
 ```bash
 pytest tests/ -v
 ```
@@ -109,1028 +656,6 @@ With coverage:
 ```bash
 pytest tests/ --cov=src --cov-report=html
 ```
-
-### Interactive CLI (Streaming Input)
-
-**Run the interactive CLI:**
-```bash
-python emotix_cli.py
-```
-
-The CLI will prompt for a User ID, then accept text entries one by one. Each entry is processed through the full 5-layer pipeline and the emotion prediction is displayed along with a summary of the last 3 entries.
-
-**Commands:**
-- Type any text and press Enter to process it
-- `summary` - Show summary of last 3 entries
-- `history` - Show full history (last 10 entries)
-- `help` - Show help message
-- `exit` or `quit` - Exit the program
-
-**Command-line options:**
-```bash
-# Specify user ID (skip prompt)
-python emotix_cli.py --user user001
-
-# Custom database and slang dictionary
-python emotix_cli.py --user user001 --db data/custom.db --slang-dict data/custom_slang.json
-
-# Custom model
-python emotix_cli.py --user user001 --model j-hartmann/emotion-english-distilroberta-base
-
-# Adjust logging level
-python emotix_cli.py --user user001 --log-level INFO
-```
-
-**Example session:**
-```
-[user001] > I am crushing it at work today!
-✓ Processed: I am crushing it at work today!
-  Normalized: I am crushing it at work today!
-  Emotion: joy (intensity: 0.85)
-
-📊 Last 3 Entries:
-[2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
-
-[user001] > The workload is crushing me
-✓ Processed: The workload is crushing me
-  Normalized: The workload is crushing me
-  Emotion: sadness (intensity: 0.78)
-
-📊 Last 3 Entries:
-[2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
-[2024-01-15 10:35:00] The workload is crushing me → sadness (0.78)
-
-[user001] > summary
-📊 Last 3 Entries Summary:
-[2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
-[2024-01-15 10:35:00] The workload is crushing me → sadness (0.78)
-[2024-01-15 10:40:00] Feeling better now → joy (0.72)
-```
-
-### Programmatic Usage
-
-**Complete Pipeline (Recommended):**
-```python
-from src.pipeline import run_full_pipeline
-
-# Run all 5 layers
-df_results = run_full_pipeline(
-    input_path="data/sample_data.csv",
-    db_path="data/mwb_log.db",
-    slang_dict_path="data/slang_dictionary.json",
-    model_name="j-hartmann/emotion-english-distilroberta-base",
-    temperature=1.5  # Confidence calibration (default: 1.5)
-)
-```
-
-**Step-by-Step Usage:**
-```python
-from src.ingest import ingest_csv
-from src.preprocess import preprocess_pipeline
-from src.contextualize import create_sequences_batch
-from src.modeling import EmotionModel, run_inference_pipeline
-from src.persistence import MWBPersistence
-
-# 1. Ingest
-df = ingest_csv("data/sample_data.csv")
-
-# 2. Preprocess
-df = preprocess_pipeline(df, slang_dict_path="data/slang_dictionary.json")
-
-# 3. Contextualize
-persistence = MWBPersistence("data/mwb_log.db")
-df = create_sequences_batch(df, persistence, max_context_turns=5)
-
-# 4. Model
-model = EmotionModel()
-df = run_inference_pipeline(df, model)
-
-# 5. Persist
-persistence.write_results(df, archive_raw=True)
-```
-
-## Layer Details
-
-### Layer 1: Ingestion (`src/ingest.py`)
-
-**Functions:**
-- `ingest_csv(file_path)` - Load from CSV
-- `ingest_jsonl(file_path)` - Load from JSON Lines
-- `ingest_json(file_path)` - Load from JSON array/object
-- `ingest_from_dict(records)` - Load from list of dicts
-- `validate_dataframe(df)` - Validate required columns and types
-
-**Validation:**
-- Required columns: `UserID`, `Text`, `Timestamp`
-- Auto-converts timestamp to datetime
-- Ensures no null values in required fields
-
-### Layer 2: Preprocessing (`src/preprocess.py`)
-
-**Features:**
-- **Slang normalization**: Dictionary lookup + fuzzy matching fallback
-- **Demojization**: Converts emojis to text descriptions
-- **Syntactic fixes**: Common typos, spacing issues
-- **Stopword preservation**: Keeps stopwords for context (configurable)
-- **Flag tracking**: Records all transformations in `NormalizationFlags`
-
-**Usage:**
-```python
-from src.preprocess import Preprocessor
-
-preprocessor = Preprocessor(slang_dict_path="data/slang_dictionary.json")
-normalized, flags = preprocessor.preprocess_text("lol that's great 😊")
-# Returns: ("laughing out loud that's great :smiling_face:", {...})
-```
-
-### Layer 5: Persistence (`src/persistence.py`)
-
-**SQLite Schema:**
-
-**`mwb_log` table:**
-- `LogID` (INTEGER PRIMARY KEY)
-- `UserID` (TEXT)
-- `Timestamp` (DATETIME)
-- `NormalizedText` (TEXT)
-- `PrimaryEmotionLabel` (TEXT, nullable) - Final emotion after post-processing
-- `IntensityScore_Primary` (REAL, nullable) - Final intensity after post-processing
-- `OriginalEmotionLabel` (TEXT, nullable) - Model prediction before post-processing
-- `OriginalIntensityScore` (REAL, nullable) - Model intensity before post-processing
-- `AmbiguityFlag` (INTEGER, default 0)
-- `NormalizationFlags` (TEXT, JSON)
-- `PostProcessingOverride` (TEXT, nullable) - Override type if label was changed
-- `FlagForReview` (INTEGER, default 0) - Combined flag from all sources
-- `PostProcessingReviewFlag` (INTEGER, default 0) - Flag from post-processing rules
-- `AnomalyDetectionFlag` (INTEGER, default 0) - Flag from user pattern analysis
-- `HighConfidenceFlag` (INTEGER, default 0) - Flag for intensity ≥0.95
-- `CreatedAt` (DATETIME)
-
-**`raw_archive` table:**
-- `ArchiveID` (INTEGER PRIMARY KEY)
-- `UserID` (TEXT)
-- `Timestamp` (DATETIME)
-- `RawText` (TEXT)
-- `Metadata` (TEXT, JSON)
-- `CreatedAt` (DATETIME)
-
-**APIs:**
-- `write_results(df, archive_raw=True, batch_size=100)` - Transaction-safe batch writes
-- `fetch_history(user_id, since_timestamp=None, limit=None)` - Fast indexed retrieval (<100ms)
-- `get_last_3_summary(user_id)` - Returns formatted summary string of last 3 entries with tags
-- `get_user_stats(user_id)` - Returns user statistics (total logs, first/last log, avg intensity)
-
-**Usage:**
-```python
-from src.persistence import MWBPersistence
-
-persistence = MWBPersistence("data/mwb_log.db")
-
-# Get formatted summary of last 3 entries
-summary = persistence.get_last_3_summary("user001")
-print(summary)
-# Output:
-# [2024-01-15 10:30:00] I am crushing it at work today! → joy (0.85)
-# [2024-01-15 10:35:00] The workload is crushing me → sadness (0.78)
-# [2024-01-15 10:40:00] Feeling better now → joy (0.72)
-
-# Get full history
-history = persistence.fetch_history("user001", limit=10)
-
-# Get user statistics
-stats = persistence.get_user_stats("user001")
-print(f"Total logs: {stats['total_logs']}")
-print(f"Average intensity: {stats['avg_intensity']:.2f}")
-```
-
-**Indexing:**
-- Composite index on `(UserID, Timestamp)` for fast history queries
-- Index on `Timestamp` for time-range queries
-
-## Layer 3: Contextualization (`src/contextualize.py`)
-
-**Functions:**
-- `create_sequence_for_model(utterance, history, max_context_turns=3, strategy=None, format_type="standard")` - Create sequence with context
-- `create_sequences_batch(df, persistence, max_context_turns=3)` - Batch sequence creation
-- `extract_context_features(history)` - Extract contextual features
-
-**Context Strategies** (`src/context_strategies.py`):
-- `RecentContextStrategy()` - Most recent N turns (default)
-- `SameDayContextStrategy()` - Only same-day context (good for journaling)
-- `EmotionalContextStrategy()` - Filter out neutral context
-- `WeightedContextStrategy()` - Weight by recency
-
-**Sequence Formats:**
-- `"standard"`: `"utterance [SEP] context"` (default)
-- `"reverse"`: `"context [SEP] utterance"`
-- `"weighted"`: `"utterance [SEP] utterance context"` (repeats utterance)
-- `"concatenated"`: `"utterance context"` (no separator)
-
-**Usage:**
-```python
-from src.contextualize import create_sequence_for_model
-from src.context_strategies import SameDayContextStrategy
-
-# Use same-day strategy for journaling
-strategy = SameDayContextStrategy()
-history = persistence.fetch_history("user001", limit=10)
-sequence = create_sequence_for_model("I'm fine", history, strategy=strategy, format_type="standard")
-```
-
-## Layer 4: Modeling (`src/modeling.py`)
-
-**Model:** `j-hartmann/emotion-english-distilroberta-base`
-- Pre-trained DistilRoBERTa model for emotion classification
-- Resource-efficient (faster than full RoBERTa)
-- Supports emotion labels: joy, sadness, anger, fear, surprise, disgust, neutral
-- Intensity prediction via softmax probabilities (0.0-1.0)
-
-**Model Limitations:**
-The base model may exhibit biases in emotion prediction:
-- **Rare emotions**: Anger, disgust, and neutral are rarely predicted even though the model supports them
-- **Class imbalance**: The model tends to favor sadness, fear, joy, and surprise over other emotions
-- **Root cause**: This is a limitation of the pre-trained model, not a calibration issue
-
-**Mitigation strategies:**
-- Fine-tune the model on domain-specific data with class weights
-- Use alternative models (e.g., `cardiffnlp/twitter-roberta-base-emotion`)
-- Apply class weights during inference
-- Consider ensemble methods combining multiple models
-
-The pipeline automatically detects and logs these limitations during inference.
-
-**Usage:**
-```python
-from src.modeling import EmotionModel
-
-# Initialize with temperature scaling for confidence calibration
-model = EmotionModel(temperature=1.5)  # Default: 1.5 (reduces overconfidence)
-result = model.predict_emotion("I'm feeling great today!")
-# Returns: {'label': 'joy', 'intensity': 0.95, ...}
-
-# Batch prediction
-results = model.predict_batch(["text1", "text2"], batch_size=32)
-
-# Ambiguity detection
-is_ambiguous, score = model.detect_ambiguity("I'm fine")
-
-# Check emotion distribution and class imbalance
-analysis = model.check_emotion_support(results)
-print(analysis['warnings'])  # Shows missing emotions or imbalance
-```
-
-**Confidence Calibration:**
-- Temperature scaling: Adjust `temperature` parameter (default: 1.5)
-  - Higher values (>1.0): Reduce confidence (softer probabilities)
-  - Lower values (<1.0): Increase confidence (sharper probabilities)
-  - Default increased to 1.5 to reduce overconfidence
-- Platt scaling and isotonic regression: Available via `CalibrationModel` class
-  - Requires scikit-learn: `pip install scikit-learn`
-  - See `CalibrationModel` docstring for example usage
-
-**Alternative Models:**
-The `EmotionModel` class can use any Hugging Face emotion classification model:
-```python
-model = EmotionModel(model_name="cardiffnlp/twitter-roberta-base-emotion", temperature=1.5)
-```
-
-**Post-Processing Rules:**
-The pipeline includes rule-based post-processing to correct common misclassifications:
-- **Positive keywords** → joy (overrides sadness/fear when confidence ≥0.75)
-- **Gratitude patterns** → joy (overrides sadness)
-- **Progress indicators** → joy (overrides sadness)
-- **Humor patterns** → joy (overrides sadness)
-- **Low confidence + positive** → joy (intensity <0.6 with positive keywords)
-- **Anxiety patterns** → validates fear predictions
-- **Depression patterns** → validates sadness predictions
-- **Sarcasm detection** → flags for review (intensity ≥0.85)
-- **Mixed emotions** → flags for review (intensity ≥0.85)
-- **Negation patterns** → flags for review (intensity ≥0.85)
-- **Neutral detection** → overrides to neutral for low-confidence predictions
-
-**Override Validation:**
-- Overrides only applied when label actually changes (prevents joy→joy, sadness→sadness)
-- Original model predictions stored in `OriginalEmotionLabel` for analysis
-- Override types tracked: `positive_keywords`, `gratitude`, `progress`, `humor`, `neutral`, `low_confidence_positive`
-
-**Review Flagging:**
-- High-confidence predictions (intensity ≥0.95) flagged for review
-- Low-intensity predictions (<0.8) NOT flagged (reduces false positives)
-- Flag sources tracked separately:
-  - `PostProcessingReviewFlag`: From post-processing rules
-  - `AnomalyDetectionFlag`: From user pattern analysis
-  - `HighConfidenceFlag`: From intensity threshold
-  - `FlagForReview`: Combined flag (OR of all sources)
-
-## Scaling Considerations
-
-### Current (Phase 1)
-- **Data Processing**: Pandas (single-threaded)
-- **Database**: SQLite (file-based)
-
-### Production Scaling Path
-- **Pandas → Bodo**: Replace `pd.DataFrame` operations with Bodo for parallel processing
-  - Location: All DataFrame operations in `ingest.py`, `preprocess.py`
-  - Migration: Minimal changes due to Bodo's pandas-compatible API
-- **SQLite → PostgreSQL/ElastiCache**: 
-  - Replace `sqlite3` with `psycopg2` or Redis client
-  - Update connection pooling in `persistence.py`
-  - Add connection retry logic for distributed systems
-
-## Logging and Audit Trail
-
-The pipeline includes checkpointing for auditability:
-
-```python
-from src.utils import checkpoint_dataframe
-
-# Save checkpoint after each transformation
-checkpoint_dataframe(df, checkpoint_dir="checkpoints", stage="preprocessing")
-```
-
-Checkpoints are saved as Parquet files with timestamps for full traceability.
-
-## Sample Data
-
-- **`data/sample_data.csv`**: 20 rows of noisy conversational text with:
-  - Emojis (😊, 😫, 🎉, etc.)
-  - Slang/abbreviations (lol, omg, tbh, idk, etc.)
-  - Typos and colloquialisms
-  - Multiple users and timestamps
-
-- **`data/slang_dictionary.json`**: 30+ common slang/abbreviation mappings
-
-## Post-Processing (`src/postprocess.py`)
-
-**Rule-based corrections** for common misclassifications:
-- Positive emotion detection (gratitude, humor, progress)
-- Neutral detection
-- Human review flagging
-
-**Usage:**
-```python
-from src.postprocess import apply_post_processing
-
-df_processed = apply_post_processing(df)
-# Adds: CorrectedLabel, CorrectedIntensity, WasOverridden, NeedsReview
-```
-
-**Context-Aware Post-Processing** (`src/context_aware_postprocess.py`):
-- Uses context to validate overrides
-- Detects context-text conflicts
-- Enhanced review flagging
-
-```python
-from src.context_aware_postprocess import apply_context_aware_post_processing
-
-df_processed = apply_context_aware_post_processing(df, context_col='Sequence')
-```
-
-## Validation (`src/validation.py`)
-
-**Synthetic Ambiguity Generator:**
-```python
-from src.validation import AmbiguityGenerator
-
-generator = AmbiguityGenerator()
-ambiguous_df = generator.generate_ambiguous_cases(num_cases=50)
-```
-
-**Metrics Tracking:**
-```python
-from src.validation import MetricsTracker
-
-tracker = MetricsTracker()
-metrics = tracker.compute_metrics(y_true, y_pred, y_true_intensity, y_pred_intensity)
-comparison = tracker.compare_with_without_context(metrics_with, metrics_without)
-```
-
-## A/B Testing (`src/ab_testing.py`)
-
-**Test different context strategies and formats:**
-```python
-from src.ab_testing import ABTester, run_ab_tests
-
-tester = ABTester(model)
-results = tester.test_context_strategies(test_cases, strategies, formats)
-summary = tester.compare_strategies(results)
-```
-
-## Anomaly Detection (`src/anomaly_detection.py`)
-
-**User Pattern Analysis:**
-Automatically detects high-risk user emotion patterns:
-- Persistent negative emotions (sadness, fear, anger)
-- Low positive emotion frequency
-- Sudden emotion shifts
-- High average intensity
-
-**Usage:**
-```python
-from src.anomaly_detection import UserPatternAnalyzer
-
-analyzer = UserPatternAnalyzer()
-user_analysis = analyzer.analyze_all_users(df)
-flagged_users = analyzer.flag_high_risk_users(df)
-# Returns users with critical risk or 3+ anomalies
-```
-
-**Risk Levels:**
-- `low`: Normal patterns
-- `medium`: Some concerns
-- `high`: Multiple negative patterns
-- `critical`: Severe patterns requiring immediate attention
-
-## Analysis Tools
-
-### Results Analysis (`analyze_results.py`)
-
-Comprehensive analysis of pipeline results from the database:
-
-```bash
-# Analyze all records
-python analyze_results.py
-
-# Analyze only recent records (last 7 days)
-python analyze_results.py --since 7
-
-# Analyze since specific date
-python analyze_results.py --since 2024-01-15
-
-# Use custom database
-python analyze_results.py --db /path/to/database.db --since 7
-```
-
-**Features:**
-- Emotion distribution analysis
-- Intensity score statistics
-- Post-processing override analysis (with original emotion tracking)
-- Ambiguity detection analysis
-- Review flag breakdown by source
-- User pattern analysis
-- Temporal pattern analysis
-- Text quality analysis
-- Evaluation metrics
-
-### Synthetic Data Generation (`generate_synthetic_data.py`)
-
-Generate diverse test data for pipeline validation:
-
-```bash
-# Generate 500 records for 10 users
-python generate_synthetic_data.py --records 500 --users 10 --output data/test_data.csv
-
-# Clear database and generate new data
-python generate_synthetic_data.py --records 100 --users 5 --clear-db --output data/synthetic_data.csv
-```
-
-**Test Cases Included:**
-- Positive examples (gratitude, humor, progress)
-- Negative examples (high-intensity emotions)
-- Neutral examples
-- Ambiguous examples
-- Low/high confidence examples
-- Sarcasm examples
-- Context-dependent examples
-
-## Technical Decisions & Research
-
-### Model Selection
-
-**Selected Model:** `j-hartmann/emotion-english-distilroberta-base`
-
-**Research Process:**
-1. **Initial Evaluation**: Evaluated multiple transformer architectures for emotion classification
-2. **Resource Constraints**: Prioritized efficiency for real-time inference
-3. **Performance Testing**: Compared DistilRoBERTa vs. full RoBERTa vs. BERT-base
-4. **Domain Fit**: Tested on conversational text samples
-
-**Rationale:**
-- **DistilRoBERTa Architecture**: 40% faster than RoBERTa-base while maintaining 97% of performance
-- **Pre-trained for Emotion**: Fine-tuned specifically for emotion classification (not general sentiment)
-- **Hugging Face Integration**: Well-maintained, actively updated model
-- **Intensity Support**: Softmax probabilities provide natural intensity scores (0.0-1.0)
-- **Resource Efficiency**: Runs on CPU with acceptable latency (<500ms per inference)
-
-**Alternative Models Considered:**
-- **multiMentalRoBERTa**: Specialized for mental health but very new (2024) and not readily available
-- **RoBERTa-base**: More accurate but 40% slower and 2x memory usage
-- **BERT-base**: Older architecture, less efficient, lower accuracy on emotion tasks
-- **cardiffnlp/twitter-roberta-base-emotion**: Twitter-specific, may not generalize to journaling
-
-**Evidence:**
-```python
-# Model supports these emotions (verified via model inspection):
-# joy, sadness, anger, fear, surprise, disgust, neutral
-# Intensity prediction via softmax: max(probabilities) = intensity score
-```
-
-### Architecture Decisions
-
-**5-Layer Pipeline Design:**
-- **Separation of Concerns**: Each layer has a single, well-defined responsibility
-- **DataFrame Interchange**: Pandas DataFrames as canonical format enables:
-  - Easy debugging (inspect intermediate results)
-  - Checkpointing at each stage (Parquet files)
-  - Integration with data science tools
-- **Two-Tier Persistence**: 
-  - `raw_archive`: Immutable audit trail of original input
-  - `mwb_log`: Structured, queryable results for analysis
-- **Context-Aware Processing**: Multi-turn sequences enable understanding of conversational flow
-
-**Evidence:**
-- Checkpoint system allows rollback to any layer (`src/utils.py:checkpoint_dataframe`)
-- Schema migration support enables evolution without data loss (`src/persistence.py:_migrate_schema`)
-- Context strategies are pluggable and testable independently (`src/context_strategies.py`)
-
-### Confidence Calibration
-
-**Problem Identified**: Initial model showed overconfidence (intensity >0.95 for many predictions)
-
-**Solution Implemented**: Temperature scaling (default: 1.5)
-- **Research**: Temperature scaling is a simple, effective calibration method (Guo et al., 2017)
-- **Implementation**: Applied to softmax probabilities before intensity calculation
-- **Result**: More realistic confidence scores, better flagging of high-confidence predictions
-
-**Evidence:**
-```python
-# Before calibration: intensity = 0.98 for "I'm fine"
-# After calibration (temp=1.5): intensity = 0.72 for "I'm fine"
-# This enables better review flagging and reduces false positives
-```
-
-### Post-Processing Strategy
-
-**Problem Identified**: Model misclassified obvious positive emotions (gratitude → sadness, progress → neutral)
-
-**Solution**: Rule-based post-processing with override validation
-- **Research**: Rule-based systems are effective for domain-specific corrections (Lewis et al., 2020)
-- **Implementation**: Pattern matching with confidence thresholds
-- **Validation**: Overrides only applied when label actually changes (prevents joy→joy)
-
-**Evidence:**
-- Post-processing corrects ~25% of misclassifications in test data
-- Override validation prevents false positives (logs when override doesn't change label)
-
-## Messy Data Handling Examples
-
-The pipeline is designed to handle real-world "messy" conversational text with slang, emojis, typos, and inconsistent formatting. Here are specific examples:
-
-### Example 1: Slang + Emoji Normalization
-
-**Input:**
-```
-lol that was hilarious 😂
-```
-
-**Processing Steps:**
-1. Slang normalization: `lol` → `laughing out loud`
-2. Emoji demojization: `😂` → `face_with_tears_of_joy`
-3. Result: `laughing out loud that was hilarious face_with_tears_of_joy`
-
-**Evidence:**
-```python
-from src.preprocess import Preprocessor
-preprocessor = Preprocessor('data/slang_dictionary.json')
-normalized, flags = preprocessor.preprocess_text("lol that was hilarious 😂")
-# Returns: ("laughing out loud that was hilarious face_with_tears_of_joy", 
-#           {'slang_replacements': [...], 'emojis_found': ['😂']})
-```
-
-### Example 2: Multiple Slang Terms
-
-**Input:**
-```
-omg tbh idk what to do
-```
-
-**Processing:**
-- `omg` → `oh my god`
-- `tbh` → `to be honest`
-- `idk` → `i don't know`
-
-**Result:** `oh my god to be honest i don't know what to do`
-
-**Evidence:** All three slang terms normalized in a single pass with flag tracking.
-
-### Example 3: Ambiguous "Crushing" Context
-
-**Positive Context:**
-```
-Input: "I am crushing it at work today!"
-Model prediction: joy (0.85)
-Post-processing: No override needed (already correct)
-```
-
-**Negative Context:**
-```
-Input: "The workload is crushing me"
-Model prediction: sadness (0.78)
-Post-processing: No override needed (already correct)
-```
-
-**Evidence:** Context-aware post-processing correctly distinguishes between positive achievement ("crushing it") and negative stress ("crushing me") using pattern matching (`src/postprocess.py:CRUSHING_POSITIVE_PATTERNS`, `CRUSHING_NEGATIVE_PATTERNS`).
-
-### Example 4: Gratitude Override
-
-**Input:**
-```
-thx for help ❤️
-```
-
-**Processing:**
-1. Slang: `thx` → `thanks`
-2. Emoji: `❤️` → `red_heart`
-3. Model prediction: `sadness` (0.68) ❌
-4. Post-processing: Detects gratitude pattern → overrides to `joy` (0.75) ✅
-
-**Evidence:**
-```python
-# Post-processing rule matches:
-# - "thanks" keyword
-# - "red_heart" (demojized heart emoji)
-# - Gratitude pattern: r'\bthx\b' or r'thanks?\s+for'
-# Result: sadness → joy override
-```
-
-### Example 5: Progress Detection
-
-**Input:**
-```
-tbh im making progress
-```
-
-**Processing:**
-1. Slang: `tbh` → `to be honest`
-2. Model prediction: `neutral` (0.19) ❌
-3. Post-processing: Detects progress pattern → overrides to `joy` (0.75) ✅
-
-**Evidence:**
-```python
-# Progress patterns matched:
-# - r'making\s+progress'
-# - r'getting\s+better'
-# - r'improving'
-# Result: neutral → joy override
-```
-
-### Example 6: Flexible Column Name Handling
-
-**Input CSV with non-standard columns:**
-```csv
-user_id,message,created_at
-user001,"lol that's great",2024-01-15 10:00:00
-```
-
-**Processing:**
-- Auto-detects: `user_id` → `UserID`, `message` → `Text`, `created_at` → `Timestamp`
-- Validates and converts timestamp to datetime
-- Handles case-insensitive matching
-
-**Evidence:** `src/ingest.py:validate_dataframe()` maps 10+ common column name variations.
-
-### Example 7: Timestamp Format Variations
-
-**Handled Formats:**
-- ISO 8601: `2024-01-15T10:00:00Z`
-- SQL format: `2024-01-15 10:00:00`
-- Unix timestamp: `1705315200`
-- Date only: `2024-01-15` (assumes midnight)
-
-**Evidence:** `pd.to_datetime()` with error handling converts all formats to consistent `datetime64[ns]`.
-
-### Example 8: Fuzzy Slang Matching
-
-**Input:**
-```
-imo this is great
-```
-
-**Processing:**
-- Exact match not found in dictionary
-- Fuzzy matching with length constraints prevents false matches
-- `imo` (3 chars) matches `imo` (3 chars) in dictionary → `in my opinion`
-
-**Evidence:** Length-based fuzzy matching prevents "am" from matching "ama" (`src/preprocess.py:normalize_slang` lines 108-114).
-
-## Bug Fixes & Safeguards
-
-### Bug Fix 1: Timestamp Type Mismatch
-
-**Problem:** SQLite stores timestamps as strings, but comparisons required datetime objects.
-
-**Error:**
-```python
-TypeError: '<' not supported between instances of 'str' and 'Timestamp'
-```
-
-**Root Cause:** `fetch_history()` returned string timestamps, but `create_sequences_batch()` expected datetime objects.
-
-**Fix:**
-1. Explicit conversion in `fetch_history()`: `pd.to_datetime(history['Timestamp'])`
-2. Defensive conversion in `create_sequences_batch()`: `pd.to_datetime(timestamp, errors='coerce')`
-3. Added `dropna()` to handle invalid timestamps gracefully
-
-**Evidence:** `src/persistence.py:fetch_history()` line 290, `src/contextualize.py:create_sequences_batch()` lines 85-95.
-
-### Bug Fix 2: Override Validation
-
-**Problem:** Post-processing applied overrides even when label didn't change (e.g., joy → joy).
-
-**Impact:** False positive override counts, misleading analytics.
-
-**Fix:**
-- Added validation: `if corrected_label == predicted_label: reset override`
-- Logs debug message when override is reset
-- Only counts actual label changes in override statistics
-
-**Evidence:** `src/postprocess.py:post_process()` lines 440-443.
-
-### Bug Fix 3: Partial Word Fuzzy Matching
-
-**Problem:** Short words like "am" incorrectly matched longer slang like "ama" (ask me anything).
-
-**Impact:** Incorrect normalization: "I am happy" → "I ask me anything happy"
-
-**Fix:**
-- Added strict length checks: For words ≤3 chars, require exact length or difference of 1
-- Added minimum length ratio: Matched word must be ≥70% of dictionary key length
-- Prevents partial matches while allowing legitimate fuzzy matches
-
-**Evidence:** `src/preprocess.py:normalize_slang()` lines 108-114.
-
-### Safeguard 1: Transaction Safety
-
-**Implementation:** ACID-compliant batch writes with rollback on error.
-
-**Evidence:**
-```python
-# src/persistence.py:write_results()
-try:
-    # Batch insert
-    conn.commit()
-except Exception as e:
-    conn.rollback()  # Prevents partial writes
-    logger.error(f"Error in batch, rolling back: {e}")
-    raise
-```
-
-### Safeguard 2: Schema Migration
-
-**Implementation:** Automatic schema migration for new columns without data loss.
-
-**Evidence:** `src/persistence.py:_migrate_schema()` detects missing columns and adds them with default values.
-
-### Safeguard 3: Input Validation
-
-**Implementation:** Comprehensive validation at ingestion layer.
-
-**Evidence:**
-- Column name normalization (handles 10+ variations)
-- Type conversion with error handling
-- Null value detection
-- Timestamp format validation
-
-**Code:** `src/ingest.py:validate_dataframe()` lines 16-73.
-
-### Safeguard 4: Graceful Degradation
-
-**Implementation:** Fallback mechanisms when optional dependencies unavailable.
-
-**Evidence:**
-- NLTK unavailable → uses regex tokenization (`src/preprocess.py:tokenize()`)
-- Transformers unavailable → raises clear error with installation instructions
-- Model loading fails → logs error and suggests alternatives
-
-## Performance Metrics
-
-### Pipeline Latency
-
-**End-to-End Pipeline (20 records):**
-- **Total Time:** 6.08 seconds
-- **Per Record:** ~304ms average
-- **Breakdown:**
-  - Ingestion: <1ms per record
-  - Preprocessing: <5ms per record
-  - Contextualization: <10ms per record
-  - Modeling: ~280ms per record (CPU inference)
-  - Persistence: <10ms per record
-
-**Evidence:** Run `python test_pipeline.py --input data/sample_data.csv` to see full breakdown.
-
-### History Retrieval Latency
-
-**Requirement:** <100ms for history retrieval (Phase 1 success criteria)
-
-**Actual Performance:**
-- **Mean:** 1.27ms
-- **Min:** 1.05ms
-- **Max:** 2.86ms
-- **P95:** 1.54ms
-- **P99:** 2.86ms
-- **✅ All queries under 100ms:** 100% compliance
-
-**Evidence:**
-```python
-# Tested with 30 queries across 3 users
-# Composite index on (UserID, Timestamp) enables sub-2ms queries
-# src/persistence.py:_init_schema() creates index automatically
-```
-
-### Model Performance
-
-**Emotion Distribution (20 sample records):**
-- Joy: 45% (9 records)
-- Sadness: 15% (3 records)
-- Surprise: 15% (3 records)
-- Neutral: 15% (3 records)
-- Fear: 10% (2 records)
-
-**Intensity Statistics:**
-- Mean: 0.730
-- Median: 0.764
-- Min: 0.202
-- Max: 0.949
-
-**Post-Processing Impact:**
-- **Overrides Applied:** 5/20 (25%)
-  - Neutral detection: 2
-  - Progress patterns: 2
-  - Low-confidence positive: 1
-- **Accuracy Improvement:** Post-processing corrects obvious misclassifications (gratitude → joy, progress → joy)
-
-**Ambiguity Detection:**
-- **Ambiguous Predictions:** 2/20 (10%)
-- **Review Flags:** 2/20 (10%) - High-confidence predictions flagged for human review
-
-**Evidence:** Run `python analyze_results.py` for comprehensive metrics.
-
-### Test Coverage
-
-**Unit Tests:** 104 tests across 9 test files
-- `test_ingest.py`: 8 tests
-- `test_preprocess.py`: 7 tests
-- `test_persistence.py`: 7 tests
-- `test_modeling.py`: 11 tests
-- `test_postprocess.py`: 21 tests
-- `test_contextualize.py`: 16 tests
-- `test_context_strategies.py`: 19 tests
-- `test_pipeline.py`: 7 tests
-- `test_cli.py`: 20 tests
-
-**Coverage:** Run `pytest tests/ --cov=src --cov-report=html` for detailed coverage report.
-
-### Database Performance
-
-**Write Performance:**
-- Batch writes: 100 records per transaction
-- Transaction time: <50ms per batch
-- Rollback on error: <1ms
-
-**Query Performance:**
-- History retrieval: <2ms (indexed)
-- User stats: <5ms (aggregated)
-- Full table scan: <100ms for 1000 records
-
-**Evidence:** Indexes on `(UserID, Timestamp)` and `Timestamp` enable fast queries.
-
-## Creative Solutions
-
-### Solution 1: Context-Aware Post-Processing
-
-**Problem:** Post-processing rules sometimes conflict with conversational context.
-
-**Solution:** Context-aware validation that checks if override makes sense given history.
-
-**Implementation:**
-- Retrieves recent emotion history
-- Validates override against context (e.g., don't override sadness → joy if recent context is negative)
-- Flags conflicts for human review
-
-**Evidence:** `src/context_aware_postprocess.py` implements context validation.
-
-### Solution 2: User Pattern Anomaly Detection
-
-**Problem:** Need to identify high-risk users without manual review of every entry.
-
-**Solution:** Automated pattern analysis that flags users with concerning emotion patterns.
-
-**Features:**
-- Detects persistent negative emotions (sadness, fear, anger)
-- Identifies sudden emotion shifts
-- Calculates risk levels (low, medium, high, critical)
-- Flags users with 3+ anomalies or critical risk
-
-**Evidence:** `src/anomaly_detection.py:UserPatternAnalyzer` analyzes user emotion distributions and temporal patterns.
-
-**Example:**
-```python
-# User with 60% sadness, 30% fear, avg intensity 0.92
-# → Risk level: "critical"
-# → Flagged for review: True
-```
-
-### Solution 3: A/B Testing Framework
-
-**Problem:** Need to systematically evaluate different context strategies and formats.
-
-**Solution:** Pluggable A/B testing framework for comparing strategies.
-
-**Features:**
-- Test multiple context strategies (Recent, SameDay, Emotional, Weighted)
-- Test multiple sequence formats (Standard, Reverse, Weighted, Concatenated)
-- Compare accuracy metrics across configurations
-- Identify best-performing combinations
-
-**Evidence:** `src/ab_testing.py:ABTester` enables systematic experimentation.
-
-### Solution 4: Two-Tier Persistence
-
-**Problem:** Need both audit trail (immutable raw data) and queryable structured data.
-
-**Solution:** Separate `raw_archive` and `mwb_log` tables.
-
-**Benefits:**
-- `raw_archive`: Immutable audit trail for compliance
-- `mwb_log`: Structured, indexed data for fast queries
-- Enables data reprocessing without losing original input
-
-**Evidence:** `src/persistence.py` implements both tables with appropriate schemas.
-
-### Solution 5: Sentiment Polarity Indicators
-
-**Problem:** Emotion labels alone don't indicate positive/negative sentiment.
-
-**Solution:** Automatic sentiment classification (positive/negative/neutral) for each emotion.
-
-**Implementation:**
-- Maps emotions to sentiment: joy, love → positive; sadness, anger → negative; neutral → neutral
-- Displays alongside emotion in CLI and summaries
-- Enables quick sentiment analysis without additional processing
-
-**Evidence:** `src/utils.py:get_emotion_sentiment()` provides sentiment mapping.
-
-**Example Output:**
-```
-Emotion: joy (positive) (intensity: 0.85)
-Emotion: sadness (negative) (intensity: 0.72)
-Emotion: neutral (neutral) (intensity: 0.45)
-```
-
-### Solution 6: Interactive CLI with Commands
-
-**Problem:** Need streaming input interface for real-time journaling.
-
-**Solution:** Interactive CLI with command support (`summary`, `history`, `help`, `exit`).
-
-**Features:**
-- Streaming text input (one entry at a time)
-- Real-time processing through full pipeline
-- Quick access to recent history
-- User-friendly command interface
-
-**Evidence:** `emotix_cli.py` implements full interactive interface with argument parsing.
-
-## Next Steps
-
-### Fine-tuning
-1. **Collect Labeled Data**:
-   - 1000+ labeled conversations from clinical partners
-   - Annotate with emotion labels and intensity scores (0.0-1.0)
-   - Include ambiguous cases requiring context
-
-2. **Fine-tune Model**:
-   - Fine-tune on labeled MWB dataset
-   - Validate on synthetic ambiguity dataset
-   - A/B test context window sizes (1, 3, 5, 10 turns)
-
-3. **Human-in-the-Loop**:
-   - Implement feedback mechanism for ambiguous cases
-   - Update slang dictionary based on user corrections
-   - Continuous model improvement
-
-### Production Readiness
-1. **Performance**:
-   - Load testing for <100ms history retrieval at scale
-   - Batch optimization for model inference
-   - Caching layer (Redis) for frequent users
-
-2. **Monitoring**:
-   - Track precision/recall with and without context
-   - Monitor clinical precision (false positive/negative rates)
-   - Alert on pipeline failures
-
-3. **API**:
-   - Create REST API endpoints for real-time inference
-   - WebSocket support for streaming conversations
-   - Rate limiting and authentication
-
-## Success Criteria (Phase 1) ✅
-
-- ✅ End-to-end demo runs locally and commits structured rows to SQLite
-- ✅ `fetch_history()` returns ordered context within <100ms for sample DB
-- ✅ Preprocessing preserves stopwords and records `NormalizationFlags` per row
-- ✅ Unit tests cover all three layers
-- ✅ Documentation includes architecture overview and run instructions
 
 ## License
 
