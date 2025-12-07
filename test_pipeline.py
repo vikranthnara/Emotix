@@ -63,11 +63,16 @@ def analyze_results(df: pd.DataFrame):
         if len(override_samples) > 0:
             print(f"\n  Sample overrides ({len(override_samples)} total):")
             for idx, row in override_samples.head(5).iterrows():
-                original = row.get('PrimaryEmotionLabel', 'N/A')
-                override = row.get('PostProcessingOverride', 'N/A')
+                # Use OriginalEmotionLabel (model prediction) not PrimaryEmotionLabel (final label)
+                original = row.get('OriginalEmotionLabel', row.get('PrimaryEmotionLabel', 'N/A'))
+                current = row.get('PrimaryEmotionLabel', 'N/A')
+                override_type = row.get('PostProcessingOverride', 'N/A')
                 text = row.get('NormalizedText', 'N/A')[:50]
                 print(f"    '{text}...'")
-                print(f"      Original: {original} → Override: {override}")
+                if original == current:
+                    print(f"      Original: {original} → Current: {current} (via {override_type}, no change)")
+                else:
+                    print(f"      Original: {original} → Current: {current} (via {override_type})")
     else:
         print("  No post-processing overrides found")
     
@@ -146,8 +151,18 @@ def main():
     print("  4. Modeling (emotion classification)")
     print("  5. Persistence (SQLite storage)")
     
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Run MWB pipeline end-to-end test')
+    parser.add_argument('--input', type=str, help='Input CSV file path (default: data/sample_data.csv)')
+    args = parser.parse_args()
+    
     # Configuration
-    data_path = project_root / "data" / "sample_data.csv"
+    if args.input:
+        data_path = Path(args.input)
+    else:
+        data_path = project_root / "data" / "sample_data.csv"
+    
     db_path = project_root / "data" / "mwb_log.db"
     slang_dict_path = project_root / "data" / "slang_dictionary.json"
     checkpoint_dir = project_root / "checkpoints"
@@ -155,7 +170,7 @@ def main():
     # Check if data file exists
     if not data_path.exists():
         print(f"\n❌ Error: Data file not found: {data_path}")
-        print("   Please ensure sample_data.csv exists in the data/ directory")
+        print("   Please ensure the input file exists")
         return 1
     
     print(f"\n📁 Input: {data_path}")

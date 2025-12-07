@@ -13,11 +13,11 @@ import logging
 try:
     from transformers import (
         AutoTokenizer, 
-        AutoModelForSequenceClassification,
-        pipeline
+        AutoModelForSequenceClassification
     )
+    # Import pipeline lazily to avoid torchvision dependency issues
     TRANSFORMERS_AVAILABLE = True
-except ImportError:
+except (ImportError, AttributeError):
     TRANSFORMERS_AVAILABLE = False
     logging.warning("transformers library not available. Install with: pip install transformers torch")
 
@@ -78,7 +78,8 @@ class EmotionModel:
             self.model.to(device)
             self.model.eval()
             
-            # Create pipeline for easier inference
+            # Create pipeline for easier inference (import here to avoid torchvision issues)
+            from transformers import pipeline
             self.pipeline = pipeline(
                 "text-classification",
                 model=self.model,

@@ -122,7 +122,7 @@ df_results = run_full_pipeline(
     db_path="data/mwb_log.db",
     slang_dict_path="data/slang_dictionary.json",
     model_name="j-hartmann/emotion-english-distilroberta-base",
-    temperature=1.3  # Confidence calibration (default: 1.3)
+    temperature=1.5  # Confidence calibration (default: 1.5)
 )
 ```
 
@@ -195,10 +195,17 @@ normalized, flags = preprocessor.preprocess_text("lol that's great 😊")
 - `UserID` (TEXT)
 - `Timestamp` (DATETIME)
 - `NormalizedText` (TEXT)
-- `PrimaryEmotionLabel` (TEXT, nullable)
-- `IntensityScore_Primary` (REAL, nullable)
+- `PrimaryEmotionLabel` (TEXT, nullable) - Final emotion after post-processing
+- `IntensityScore_Primary` (REAL, nullable) - Final intensity after post-processing
+- `OriginalEmotionLabel` (TEXT, nullable) - Model prediction before post-processing
+- `OriginalIntensityScore` (REAL, nullable) - Model intensity before post-processing
 - `AmbiguityFlag` (INTEGER, default 0)
 - `NormalizationFlags` (TEXT, JSON)
+- `PostProcessingOverride` (TEXT, nullable) - Override type if label was changed
+- `FlagForReview` (INTEGER, default 0) - Combined flag from all sources
+- `PostProcessingReviewFlag` (INTEGER, default 0) - Flag from post-processing rules
+- `AnomalyDetectionFlag` (INTEGER, default 0) - Flag from user pattern analysis
+- `HighConfidenceFlag` (INTEGER, default 0) - Flag for intensity ≥0.95
 - `CreatedAt` (DATETIME)
 
 **`raw_archive` table:**
@@ -274,7 +281,7 @@ The pipeline automatically detects and logs these limitations during inference.
 from src.modeling import EmotionModel
 
 # Initialize with temperature scaling for confidence calibration
-model = EmotionModel(temperature=1.3)  # Default: 1.3 (reduces overconfidence)
+model = EmotionModel(temperature=1.5)  # Default: 1.5 (reduces overconfidence)
 result = model.predict_emotion("I'm feeling great today!")
 # Returns: {'label': 'joy', 'intensity': 0.95, ...}
 
@@ -290,9 +297,10 @@ print(analysis['warnings'])  # Shows missing emotions or imbalance
 ```
 
 **Confidence Calibration:**
-- Temperature scaling: Adjust `temperature` parameter (default: 1.3)
+- Temperature scaling: Adjust `temperature` parameter (default: 1.5)
   - Higher values (>1.0): Reduce confidence (softer probabilities)
   - Lower values (<1.0): Increase confidence (sharper probabilities)
+  - Default increased to 1.5 to reduce overconfidence
 - Platt scaling and isotonic regression: Available via `CalibrationModel` class
   - Requires scikit-learn: `pip install scikit-learn`
   - See `CalibrationModel` docstring for example usage
@@ -300,7 +308,7 @@ print(analysis['warnings'])  # Shows missing emotions or imbalance
 **Alternative Models:**
 The `EmotionModel` class can use any Hugging Face emotion classification model:
 ```python
-model = EmotionModel(model_name="cardiffnlp/twitter-roberta-base-emotion", temperature=1.3)
+model = EmotionModel(model_name="cardiffnlp/twitter-roberta-base-emotion", temperature=1.5)
 ```
 
 **Post-Processing Rules:**
@@ -312,12 +320,24 @@ The pipeline includes rule-based post-processing to correct common misclassifica
 - **Low confidence + positive** → joy (intensity <0.6 with positive keywords)
 - **Anxiety patterns** → validates fear predictions
 - **Depression patterns** → validates sadness predictions
-- **Sarcasm detection** → flags for review
-- **Mixed emotions** → flags for review
-- **Negation patterns** → adjusts predictions
+- **Sarcasm detection** → flags for review (intensity ≥0.85)
+- **Mixed emotions** → flags for review (intensity ≥0.85)
+- **Negation patterns** → flags for review (intensity ≥0.85)
 - **Neutral detection** → overrides to neutral for low-confidence predictions
 
-High-confidence predictions (intensity >0.95) are automatically flagged for review.
+**Override Validation:**
+- Overrides only applied when label actually changes (prevents joy→joy, sadness→sadness)
+- Original model predictions stored in `OriginalEmotionLabel` for analysis
+- Override types tracked: `positive_keywords`, `gratitude`, `progress`, `humor`, `neutral`, `low_confidence_positive`
+
+**Review Flagging:**
+- High-confidence predictions (intensity ≥0.95) flagged for review
+- Low-intensity predictions (<0.8) NOT flagged (reduces false positives)
+- Flag sources tracked separately:
+  - `PostProcessingReviewFlag`: From post-processing rules
+  - `AnomalyDetectionFlag`: From user pattern analysis
+  - `HighConfidenceFlag`: From intensity threshold
+  - `FlagForReview`: Combined flag (OR of all sources)
 
 ## Scaling Considerations
 
@@ -412,6 +432,83 @@ tester = ABTester(model)
 results = tester.test_context_strategies(test_cases, strategies, formats)
 summary = tester.compare_strategies(results)
 ```
+
+## Anomaly Detection (`src/anomaly_detection.py`)
+
+**User Pattern Analysis:**
+Automatically detects high-risk user emotion patterns:
+- Persistent negative emotions (sadness, fear, anger)
+- Low positive emotion frequency
+- Sudden emotion shifts
+- High average intensity
+
+**Usage:**
+```python
+from src.anomaly_detection import UserPatternAnalyzer
+
+analyzer = UserPatternAnalyzer()
+user_analysis = analyzer.analyze_all_users(df)
+flagged_users = analyzer.flag_high_risk_users(df)
+# Returns users with critical risk or 3+ anomalies
+```
+
+**Risk Levels:**
+- `low`: Normal patterns
+- `medium`: Some concerns
+- `high`: Multiple negative patterns
+- `critical`: Severe patterns requiring immediate attention
+
+## Analysis Tools
+
+### Results Analysis (`analyze_results.py`)
+
+Comprehensive analysis of pipeline results from the database:
+
+```bash
+# Analyze all records
+python analyze_results.py
+
+# Analyze only recent records (last 7 days)
+python analyze_results.py --since 7
+
+# Analyze since specific date
+python analyze_results.py --since 2024-01-15
+
+# Use custom database
+python analyze_results.py --db /path/to/database.db --since 7
+```
+
+**Features:**
+- Emotion distribution analysis
+- Intensity score statistics
+- Post-processing override analysis (with original emotion tracking)
+- Ambiguity detection analysis
+- Review flag breakdown by source
+- User pattern analysis
+- Temporal pattern analysis
+- Text quality analysis
+- Evaluation metrics
+
+### Synthetic Data Generation (`generate_synthetic_data.py`)
+
+Generate diverse test data for pipeline validation:
+
+```bash
+# Generate 500 records for 10 users
+python generate_synthetic_data.py --records 500 --users 10 --output data/test_data.csv
+
+# Clear database and generate new data
+python generate_synthetic_data.py --records 100 --users 5 --clear-db --output data/synthetic_data.csv
+```
+
+**Test Cases Included:**
+- Positive examples (gratitude, humor, progress)
+- Negative examples (high-intensity emotions)
+- Neutral examples
+- Ambiguous examples
+- Low/high confidence examples
+- Sarcasm examples
+- Context-dependent examples
 
 ## Model Selection
 
