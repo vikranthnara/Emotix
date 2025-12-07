@@ -266,6 +266,106 @@ sequence = "I'm fine [SEP] I'm feeling terrible today Nothing is working for me"
 
 This context-aware design significantly improves emotion classification accuracy, especially for ambiguous or context-dependent expressions common in mental well-being tracking.
 
+## Suicidal Ideation Detection
+
+### Overview
+
+The pipeline includes a critical safety feature for detecting suicidal ideation patterns in user text. This feature operates as an additional layer (Step 4.5) after emotion modeling and before persistence, providing immediate crisis support resources when concerning patterns are detected.
+
+### How It Works
+
+The `SuicidalIdeationDetector` uses pattern-based detection with multiple confidence levels:
+
+1. **Direct Patterns** (Confidence: 0.95)
+   - Explicit statements: "I want to die", "I'm going to kill myself", "I need to end my life"
+   - Suicide-related terms: "commit suicide", "take my life", "ending it all"
+   - Future tense variations: "I'll kill myself", "I'm going to end it"
+
+2. **Planning Patterns** (Confidence: 0.90)
+   - Active planning language: "thinking about ending it", "planning to kill myself"
+   - Method-specific indicators: "have pills", "have a gun", "everything is ready"
+   - Time-specific indicators: "tonight", "today", "this week"
+
+3. **Goodbye Patterns** (Confidence: 0.90)
+   - Final messages: "goodbye forever", "this is my last message", "tell everyone I love them"
+   - Farewell statements in context of crisis indicators
+
+4. **Indirect Patterns** (Confidence: 0.80)
+   - Worthlessness: "not worth living", "life isn't worth it", "I'm a burden"
+   - Burden on others: "everyone would be better without me", "no one would miss me"
+   - Pointlessness: "no point", "nothing matters", "no reason to live"
+   - Self-hatred: "hate myself", "hate my life", "I'm terrible"
+
+5. **Hopelessness Patterns** (Confidence: 0.75)
+   - No hope: "hopeless", "nothing will change", "never get better"
+   - Trapped feelings: "no way out", "trapped", "no escape"
+   - Giving up: "giving up", "done trying", "can't fight anymore"
+
+6. **Multiple Indicators** (Confidence: 0.70)
+   - Safety net: Detects when multiple concerning keywords appear together
+   - Catches combinations that might not match specific patterns
+
+### False Positive Prevention
+
+The detector includes safeguards to reduce false positives:
+- Excludes common phrases: "I could kill for a pizza", "I'm dying to see that"
+- Context-aware detection: Ambiguous phrases like "I'm done" only trigger with additional concerning context
+- Pattern validation: Requires specific linguistic structures, not just keyword presence
+
+### Integration & Impact
+
+**Pipeline Integration:**
+- Runs automatically after emotion modeling (Step 4.5)
+- Analyzes original text (before normalization) to preserve semantic meaning
+- Adds three columns to the DataFrame:
+  - `SuicidalIdeationFlag`: Boolean indicating detection
+  - `SuicidalIdeationConfidence`: Confidence score (0.0-1.0)
+  - `SuicidalIdeationPattern`: Type of pattern detected
+
+**Automatic Flagging:**
+- Any detected suicidal ideation automatically sets `FlagForReview = True`
+- Logs warnings with user ID and timestamp for audit trail
+- Immediately displays crisis support resources to the user
+
+**Crisis Support Resources:**
+When detection occurs, the system immediately displays:
+- 24/7 emergency contact information
+- International crisis resources (IASP, Befrienders Worldwide)
+- Crisis Text Line information
+- Encouraging message emphasizing that help is available
+
+**Impact:**
+- **Immediate Response**: Provides crisis resources instantly when concerning patterns are detected
+- **Early Intervention**: Catches both explicit and indirect expressions of suicidal ideation
+- **Comprehensive Coverage**: Detects patterns across multiple linguistic styles and variations
+- **Privacy-Preserving**: Operates locally without external API calls
+- **Audit Trail**: Logs all detections with user context for follow-up care
+
+**Clinical Considerations:**
+- This is a screening tool, not a diagnostic tool
+- All detections should be reviewed by mental health professionals
+- High-confidence detections (≥0.90) require immediate human review
+- The system prioritizes sensitivity (catching true cases) over specificity (avoiding false positives) for safety
+
+### Usage Example
+
+```python
+from src.suicidal_detection import SuicidalIdeationDetector
+
+detector = SuicidalIdeationDetector()
+is_detected, confidence, pattern_type = detector.process_text(
+    "I don't want to live anymore",
+    user_id="user001",
+    timestamp=datetime.now()
+)
+
+if is_detected:
+    print(f"Detected: {pattern_type} (confidence: {confidence:.2f})")
+    # Help message is automatically displayed
+```
+
+The detector is automatically integrated into the full pipeline and CLI, providing seamless crisis detection for all processed text entries.
+
 ## Installation
 
 ### Prerequisites
@@ -506,14 +606,56 @@ These metrics demonstrate the pipeline's effectiveness in emotion classification
 
 ## AI Disclosure
 
-This project was developed with the assistance of AI tools including ChatGPT and GitHub Copilot. AI assistance was used for:
-- Code generation and refactoring
-- Documentation writing and editing
-- Debugging and error resolution
-- Code review and optimization suggestions
-- **Synthetic dataset generation**: Leveraged ChatGPT to generate diverse test cases and patterns for the 500-record synthetic dataset used for pipeline evaluation
+This project was developed with the assistance of AI tools, primarily **Cursor IDE** (an AI-powered code editor), along with ChatGPT and GitHub Copilot. AI assistance was strategically leveraged throughout the development process.
 
-All technical decisions, architecture choices, and implementation details were reviewed and validated by the developer. The final codebase, test suite, and documentation represent the developer's understanding and implementation of the system.
+### AI Usage
+
+**1. Code Documentation and Comments**
+- AI was used to generate comprehensive documentation and inline comments for each source file
+- Every module includes detailed docstrings, function descriptions, and usage examples
+- This ensures code maintainability and helps future developers understand the system architecture
+
+**2. Synthetic Dataset Generation**
+- Leveraged ChatGPT to generate diverse test cases and patterns for the 500-record synthetic dataset (`data/synthetic_data_large.csv`)
+- AI helped create realistic conversational text covering all emotion classes, edge cases, and ambiguous scenarios
+- The synthetic dataset includes positive examples (gratitude, humor, progress), negative examples (high-intensity emotions), neutral cases, sarcasm, and context-dependent scenarios
+
+**3. Multi-Agent Development System**
+- **Cursor IDE's multi-agent capabilities** were leveraged to create a specialized "team" of AI agents, each focusing on specific features:
+  - **Ingestion Agent**: Specialized in Layer 1 (data ingestion, validation, format handling)
+  - **Preprocessing Agent**: Focused on Layer 2 (slang normalization, emoji handling, text cleaning)
+  - **Contextualization Agent**: Dedicated to Layer 3 (context retrieval, sequence formatting, strategy implementation)
+  - **Modeling Agent**: Handled Layer 4 (emotion classification, intensity prediction, model integration)
+  - **Persistence Agent**: Managed Layer 5 (database schema, query optimization, transaction safety)
+  - **Post-Processing Agent**: Specialized in rule-based corrections and override validation
+  - **Crisis Detection Agent**: Focused on suicidal ideation detection patterns and help resources
+  - **Testing Agent**: Dedicated exclusively to unit tests, integration tests, and test coverage
+- This multi-agent approach enabled parallel development and specialization, similar to having a team of workers where each agent became an expert in their domain
+- The testing agent ensured comprehensive test coverage (104 tests across 9 test files) and validated all features independently
+
+### Validation of AI Output
+
+All AI-generated code, documentation, and synthetic data were rigorously validated:
+
+**Code Validation**:
+- **Manual Review**: All AI-generated code was reviewed line-by-line by the developer
+- **Unit Testing**: The testing agent created comprehensive test suites that validated functionality
+- **Integration Testing**: End-to-end pipeline tests ensured all layers work together correctly
+- **Performance Testing**: History retrieval performance (<100ms) was verified through benchmarks
+- **Edge Case Testing**: Synthetic data was used to test edge cases and error handling
+
+**Synthetic Data Validation**:
+- **Pattern Matching**: Created ground truth labels (`data/ground_truth_large.csv`) using pattern-based rules to validate synthetic data quality
+- **Emotion Distribution**: Verified synthetic dataset covers all 7 emotion classes with realistic distributions
+- **Pipeline Testing**: Ran synthetic data through the complete pipeline to ensure it produces valid results
+- **Metrics Validation**: Compared pipeline performance on synthetic data against expected patterns
+
+**Documentation Validation**:
+- **Code-Documentation Alignment**: Verified all documentation matches actual implementation
+- **Example Testing**: All code examples in documentation were tested to ensure they work correctly
+- **Architecture Accuracy**: Confirmed technical descriptions accurately reflect the system design
+
+All technical decisions, architecture choices, and implementation details were reviewed and validated by the developer. The final codebase, test suite, and documentation represent the developer's understanding and implementation of the system, with AI serving as a productivity multiplier rather than a replacement for human oversight.
 
 ## Project Structure
 
@@ -544,106 +686,6 @@ Emotix/
 - **Suicidal Ideation Detection**: Real-time detection of crisis indicators with immediate help resources
 - **Fast Queries**: History retrieval under 100ms with indexed database
 - **Two-Tier Storage**: Immutable raw archive + structured queryable log
-
-## Suicidal Ideation Detection
-
-### Overview
-
-The pipeline includes a critical safety feature for detecting suicidal ideation patterns in user text. This feature operates as an additional layer (Step 4.5) after emotion modeling and before persistence, providing immediate crisis support resources when concerning patterns are detected.
-
-### How It Works
-
-The `SuicidalIdeationDetector` uses pattern-based detection with multiple confidence levels:
-
-1. **Direct Patterns** (Confidence: 0.95)
-   - Explicit statements: "I want to die", "I'm going to kill myself", "I need to end my life"
-   - Suicide-related terms: "commit suicide", "take my life", "ending it all"
-   - Future tense variations: "I'll kill myself", "I'm going to end it"
-
-2. **Planning Patterns** (Confidence: 0.90)
-   - Active planning language: "thinking about ending it", "planning to kill myself"
-   - Method-specific indicators: "have pills", "have a gun", "everything is ready"
-   - Time-specific indicators: "tonight", "today", "this week"
-
-3. **Goodbye Patterns** (Confidence: 0.90)
-   - Final messages: "goodbye forever", "this is my last message", "tell everyone I love them"
-   - Farewell statements in context of crisis indicators
-
-4. **Indirect Patterns** (Confidence: 0.80)
-   - Worthlessness: "not worth living", "life isn't worth it", "I'm a burden"
-   - Burden on others: "everyone would be better without me", "no one would miss me"
-   - Pointlessness: "no point", "nothing matters", "no reason to live"
-   - Self-hatred: "hate myself", "hate my life", "I'm terrible"
-
-5. **Hopelessness Patterns** (Confidence: 0.75)
-   - No hope: "hopeless", "nothing will change", "never get better"
-   - Trapped feelings: "no way out", "trapped", "no escape"
-   - Giving up: "giving up", "done trying", "can't fight anymore"
-
-6. **Multiple Indicators** (Confidence: 0.70)
-   - Safety net: Detects when multiple concerning keywords appear together
-   - Catches combinations that might not match specific patterns
-
-### False Positive Prevention
-
-The detector includes safeguards to reduce false positives:
-- Excludes common phrases: "I could kill for a pizza", "I'm dying to see that"
-- Context-aware detection: Ambiguous phrases like "I'm done" only trigger with additional concerning context
-- Pattern validation: Requires specific linguistic structures, not just keyword presence
-
-### Integration & Impact
-
-**Pipeline Integration:**
-- Runs automatically after emotion modeling (Step 4.5)
-- Analyzes original text (before normalization) to preserve semantic meaning
-- Adds three columns to the DataFrame:
-  - `SuicidalIdeationFlag`: Boolean indicating detection
-  - `SuicidalIdeationConfidence`: Confidence score (0.0-1.0)
-  - `SuicidalIdeationPattern`: Type of pattern detected
-
-**Automatic Flagging:**
-- Any detected suicidal ideation automatically sets `FlagForReview = True`
-- Logs warnings with user ID and timestamp for audit trail
-- Immediately displays crisis support resources to the user
-
-**Crisis Support Resources:**
-When detection occurs, the system immediately displays:
-- 24/7 emergency contact information
-- International crisis resources (IASP, Befrienders Worldwide)
-- Crisis Text Line information
-- Encouraging message emphasizing that help is available
-
-**Impact:**
-- **Immediate Response**: Provides crisis resources instantly when concerning patterns are detected
-- **Early Intervention**: Catches both explicit and indirect expressions of suicidal ideation
-- **Comprehensive Coverage**: Detects patterns across multiple linguistic styles and variations
-- **Privacy-Preserving**: Operates locally without external API calls
-- **Audit Trail**: Logs all detections with user context for follow-up care
-
-**Clinical Considerations:**
-- This is a screening tool, not a diagnostic tool
-- All detections should be reviewed by mental health professionals
-- High-confidence detections (≥0.90) require immediate human review
-- The system prioritizes sensitivity (catching true cases) over specificity (avoiding false positives) for safety
-
-### Usage Example
-
-```python
-from src.suicidal_detection import SuicidalIdeationDetector
-
-detector = SuicidalIdeationDetector()
-is_detected, confidence, pattern_type = detector.process_text(
-    "I don't want to live anymore",
-    user_id="user001",
-    timestamp=datetime.now()
-)
-
-if is_detected:
-    print(f"Detected: {pattern_type} (confidence: {confidence:.2f})")
-    # Help message is automatically displayed
-```
-
-The detector is automatically integrated into the full pipeline and CLI, providing seamless crisis detection for all processed text entries.
 
 ## Testing
 
