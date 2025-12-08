@@ -402,7 +402,7 @@ The journal feature is integrated throughout the pipeline:
 
 The multi-journal feature enhances the pipeline's flexibility and makes it suitable for diverse mental well-being tracking scenarios.
 
-## Suicidal Ideation Detection
+## Suicidal Detection
 
 ### Overview
 
