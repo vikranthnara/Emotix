@@ -844,6 +844,3 @@ With coverage:
 ```bash
 pytest tests/ --cov=src --cov-report=html
 ```
-
-
-[Contributing guidelines]
