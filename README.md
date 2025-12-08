@@ -845,10 +845,5 @@ With coverage:
 pytest tests/ --cov=src --cov-report=html
 ```
 
-## License
-
-[Specify license]
-
-## Contributing
 
 [Contributing guidelines]
