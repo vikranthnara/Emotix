@@ -696,7 +696,7 @@ df_results = run_full_pipeline(
 - Confirmed two-tier storage (raw_archive + mwb_log) maintains data integrity
 
 **Testing Coverage:**
-- 104 unit tests across all layers
+- 103 unit tests across all layers
 - Integration tests for complete pipeline
 - Performance tests for history retrieval
 - Synthetic data validation with known ground truth
