@@ -304,8 +304,10 @@ class TestCLIInteractiveLoop:
         """Test summary command in interactive loop."""
         from emotix_cli import interactive_loop
         
-        # Create persistence with some test data
+        # Create persistence with some test data and a journal
         persistence = MWBPersistence(temp_db)
+        journal_id = persistence.create_journal("testuser", "Test Journal")
+        
         df = pd.DataFrame({
             'UserID': ['testuser', 'testuser'],
             'Timestamp': [datetime(2024, 1, 1, 10, 0), datetime(2024, 1, 1, 11, 0)],
@@ -315,26 +317,30 @@ class TestCLIInteractiveLoop:
             'PrimaryEmotionLabel': ['joy', 'sadness'],
             'IntensityScore_Primary': [0.8, 0.9]
         })
-        persistence.write_results(df, archive_raw=False)
+        persistence.write_results(df, archive_raw=False, journal_id=journal_id)
         
         # Mock model and postprocessor
         mock_model = Mock(spec=EmotionModel)
         mock_postprocessor = Mock(spec=EmotionPostProcessor)
         
-        # Mock input to return 'summary' then 'exit'
-        with patch('builtins.input', side_effect=['summary', 'exit']):
+        # Mock input to select journal (1), then 'summary', then 'exit'
+        with patch('builtins.input', side_effect=['1', 'summary', 'exit']):
             with patch('emotix_cli.EmotionModel', return_value=mock_model):
                 with patch('emotix_cli.EmotionPostProcessor', return_value=mock_postprocessor):
-                    with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
-                        mock_preprocessor = Mock()
-                        mock_preprocessor.preprocess_dataframe.return_value = df
-                        mock_preprocessor_class.return_value = mock_preprocessor
-                        interactive_loop(
-                            user_id="testuser",
-                            db_path=Path(temp_db),
-                            slang_dict_path=None,
-                            model_name="j-hartmann/emotion-english-distilroberta-base"
-                        )
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
+                            mock_detector = Mock()
+                            mock_detector.process_text.return_value = (False, 0.0, None)
+                            mock_detector_class.return_value = mock_detector
+                            mock_preprocessor = Mock()
+                            mock_preprocessor.preprocess_dataframe.return_value = df
+                            mock_preprocessor_class.return_value = mock_preprocessor
+                            interactive_loop(
+                                user_id="testuser",
+                                db_path=Path(temp_db),
+                                slang_dict_path=None,
+                                model_name="j-hartmann/emotion-english-distilroberta-base"
+                            )
         
         captured = capsys.readouterr()
         assert "Last 3 Entries Summary" in captured.out or "Last 3 Entries" in captured.out
@@ -343,8 +349,10 @@ class TestCLIInteractiveLoop:
         """Test history command in interactive loop."""
         from emotix_cli import interactive_loop
         
-        # Create persistence with test data
+        # Create persistence with test data and a journal
         persistence = MWBPersistence(temp_db)
+        journal_id = persistence.create_journal("testuser", "Test Journal")
+        
         df = pd.DataFrame({
             'UserID': ['testuser'] * 3,
             'Timestamp': [
@@ -358,26 +366,30 @@ class TestCLIInteractiveLoop:
             'PrimaryEmotionLabel': ['joy', 'sadness', 'anger'],
             'IntensityScore_Primary': [0.8, 0.9, 0.7]
         })
-        persistence.write_results(df, archive_raw=False)
+        persistence.write_results(df, archive_raw=False, journal_id=journal_id)
         
         # Mock model and postprocessor
         mock_model = Mock(spec=EmotionModel)
         mock_postprocessor = Mock(spec=EmotionPostProcessor)
         
-        # Mock input to return 'history' then 'exit'
-        with patch('builtins.input', side_effect=['history', 'exit']):
+        # Mock input to select journal (1), then 'history', then 'exit'
+        with patch('builtins.input', side_effect=['1', 'history', 'exit']):
             with patch('emotix_cli.EmotionModel', return_value=mock_model):
                 with patch('emotix_cli.EmotionPostProcessor', return_value=mock_postprocessor):
-                    with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
-                        mock_preprocessor = Mock()
-                        mock_preprocessor.preprocess_dataframe.return_value = df
-                        mock_preprocessor_class.return_value = mock_preprocessor
-                        interactive_loop(
-                            user_id="testuser",
-                            db_path=Path(temp_db),
-                            slang_dict_path=None,
-                            model_name="j-hartmann/emotion-english-distilroberta-base"
-                        )
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
+                            mock_detector = Mock()
+                            mock_detector.process_text.return_value = (False, 0.0, None)
+                            mock_detector_class.return_value = mock_detector
+                            mock_preprocessor = Mock()
+                            mock_preprocessor.preprocess_dataframe.return_value = df
+                            mock_preprocessor_class.return_value = mock_preprocessor
+                            interactive_loop(
+                                user_id="testuser",
+                                db_path=Path(temp_db),
+                                slang_dict_path=None,
+                                model_name="j-hartmann/emotion-english-distilroberta-base"
+                            )
         
         captured = capsys.readouterr()
         assert "History" in captured.out or "history" in captured.out.lower()
@@ -390,21 +402,29 @@ class TestCLIInteractiveLoop:
             temp_path = f.name
         
         try:
-            # Mock input to return 'help' then 'exit'
-            with patch('builtins.input', side_effect=['help', 'exit']):
+            # Create a journal first
+            persistence = MWBPersistence(temp_path)
+            persistence.create_journal("testuser", "Test Journal")
+            
+            # Mock input to select journal (1), then 'help', then 'exit'
+            with patch('builtins.input', side_effect=['1', 'help', 'exit']):
                 with patch('emotix_cli.EmotionModel') as mock_model_class:
                     with patch('emotix_cli.EmotionPostProcessor') as mock_postprocessor_class:
-                        mock_model_class.return_value = Mock(spec=EmotionModel)
-                        mock_postprocessor_class.return_value = Mock(spec=EmotionPostProcessor)
-                        with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
-                            mock_preprocessor = Mock()
-                            mock_preprocessor_class.return_value = mock_preprocessor
-                            interactive_loop(
-                                user_id="testuser",
-                                db_path=Path(temp_path),
-                                slang_dict_path=None,
-                                model_name="j-hartmann/emotion-english-distilroberta-base"
-                            )
+                        with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                            mock_model_class.return_value = Mock(spec=EmotionModel)
+                            mock_postprocessor_class.return_value = Mock(spec=EmotionPostProcessor)
+                            mock_detector = Mock()
+                            mock_detector.process_text.return_value = (False, 0.0, None)
+                            mock_detector_class.return_value = mock_detector
+                            with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
+                                mock_preprocessor = Mock()
+                                mock_preprocessor_class.return_value = mock_preprocessor
+                                interactive_loop(
+                                    user_id="testuser",
+                                    db_path=Path(temp_path),
+                                    slang_dict_path=None,
+                                    model_name="j-hartmann/emotion-english-distilroberta-base"
+                                )
             
             captured = capsys.readouterr()
             # Help should show welcome message
@@ -415,6 +435,10 @@ class TestCLIInteractiveLoop:
     def test_interactive_loop_process_entry(self, temp_db, capsys):
         """Test processing an actual entry in interactive loop."""
         from emotix_cli import interactive_loop
+        
+        # Create a journal first
+        persistence = MWBPersistence(temp_db)
+        persistence.create_journal("testuser", "Test Journal")
         
         # Mock model to avoid loading actual transformer
         mock_model = Mock(spec=EmotionModel)
@@ -427,30 +451,35 @@ class TestCLIInteractiveLoop:
         mock_postprocessor = Mock(spec=EmotionPostProcessor)
         mock_postprocessor.post_process.return_value = ('joy', 0.85, False, None)
         
-        # Mock input to process an entry then exit
-        with patch('builtins.input', side_effect=['I am happy', 'exit']):
+        # Mock input to select journal (1), process an entry, then exit
+        with patch('builtins.input', side_effect=['1', 'I am happy', 'exit']):
             with patch('emotix_cli.EmotionModel', return_value=mock_model):
                 with patch('emotix_cli.EmotionPostProcessor', return_value=mock_postprocessor):
-                    with patch('emotix_cli.run_inference_pipeline') as mock_inference:
-                        # Mock inference to return DataFrame with predictions
-                        mock_inference.return_value = pd.DataFrame({
-                            'UserID': ['testuser'],
-                            'Text': ['I am happy'],
-                            'Timestamp': [datetime(2024, 1, 1, 10, 0)],
-                            'NormalizedText': ['I am happy'],
-                            'NormalizationFlags': [{}],
-                            'Sequence': ['I am happy'],
-                            'PrimaryEmotionLabel': ['joy'],
-                            'IntensityScore_Primary': [0.85],
-                            'AmbiguityFlag': [False]
-                        })
-                        
-                        interactive_loop(
-                            user_id="testuser",
-                            db_path=Path(temp_db),
-                            slang_dict_path=None,
-                            model_name="j-hartmann/emotion-english-distilroberta-base"
-                        )
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        with patch('emotix_cli.run_inference_pipeline') as mock_inference:
+                            mock_detector = Mock()
+                            mock_detector.process_text.return_value = (False, 0.0, None)
+                            mock_detector_class.return_value = mock_detector
+                            
+                            # Mock inference to return DataFrame with predictions
+                            mock_inference.return_value = pd.DataFrame({
+                                'UserID': ['testuser'],
+                                'Text': ['I am happy'],
+                                'Timestamp': [datetime(2024, 1, 1, 10, 0)],
+                                'NormalizedText': ['I am happy'],
+                                'NormalizationFlags': [{}],
+                                'Sequence': ['I am happy'],
+                                'PrimaryEmotionLabel': ['joy'],
+                                'IntensityScore_Primary': [0.85],
+                                'AmbiguityFlag': [False]
+                            })
+                            
+                            interactive_loop(
+                                user_id="testuser",
+                                db_path=Path(temp_db),
+                                slang_dict_path=None,
+                                model_name="j-hartmann/emotion-english-distilroberta-base"
+                            )
         
         captured = capsys.readouterr()
         assert "Processed" in captured.out or "happy" in captured.out.lower()
@@ -459,48 +488,64 @@ class TestCLIInteractiveLoop:
         """Test handling KeyboardInterrupt in interactive loop."""
         from emotix_cli import interactive_loop
         
+        # Create a journal first
+        persistence = MWBPersistence(temp_db)
+        persistence.create_journal("testuser", "Test Journal")
+        
         mock_model = Mock(spec=EmotionModel)
         mock_postprocessor = Mock(spec=EmotionPostProcessor)
         
-        # Mock input to raise KeyboardInterrupt
-        with patch('builtins.input', side_effect=KeyboardInterrupt()):
+        # Mock input to select journal (1), then raise KeyboardInterrupt
+        with patch('builtins.input', side_effect=['1', KeyboardInterrupt()]):
             with patch('emotix_cli.EmotionModel', return_value=mock_model):
                 with patch('emotix_cli.EmotionPostProcessor', return_value=mock_postprocessor):
-                    with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
-                        mock_preprocessor = Mock()
-                        mock_preprocessor_class.return_value = mock_preprocessor
-                        # Should handle KeyboardInterrupt gracefully
-                        try:
-                            interactive_loop(
-                                user_id="testuser",
-                                db_path=Path(temp_db),
-                                slang_dict_path=None,
-                                model_name="j-hartmann/emotion-english-distilroberta-base"
-                            )
-                        except KeyboardInterrupt:
-                            pytest.fail("KeyboardInterrupt should be handled gracefully")
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
+                            mock_detector = Mock()
+                            mock_detector.process_text.return_value = (False, 0.0, None)
+                            mock_detector_class.return_value = mock_detector
+                            mock_preprocessor = Mock()
+                            mock_preprocessor_class.return_value = mock_preprocessor
+                            # Should handle KeyboardInterrupt gracefully
+                            try:
+                                interactive_loop(
+                                    user_id="testuser",
+                                    db_path=Path(temp_db),
+                                    slang_dict_path=None,
+                                    model_name="j-hartmann/emotion-english-distilroberta-base"
+                                )
+                            except KeyboardInterrupt:
+                                pytest.fail("KeyboardInterrupt should be handled gracefully")
     
     def test_interactive_loop_empty_input(self, temp_db):
         """Test handling empty input in interactive loop."""
         from emotix_cli import interactive_loop
         
+        # Create a journal first
+        persistence = MWBPersistence(temp_db)
+        persistence.create_journal("testuser", "Test Journal")
+        
         mock_model = Mock(spec=EmotionModel)
         mock_postprocessor = Mock(spec=EmotionPostProcessor)
         
-        # Mock input to return empty string then exit
-        with patch('builtins.input', side_effect=['', '   ', 'exit']):
+        # Mock input to select journal (1), return empty string, then exit
+        with patch('builtins.input', side_effect=['1', '', '   ', 'exit']):
             with patch('emotix_cli.EmotionModel', return_value=mock_model):
                 with patch('emotix_cli.EmotionPostProcessor', return_value=mock_postprocessor):
-                    with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
-                        mock_preprocessor = Mock()
-                        mock_preprocessor_class.return_value = mock_preprocessor
-                        with patch('emotix_cli.process_single_entry') as mock_process:
-                            interactive_loop(
-                                user_id="testuser",
-                                db_path=Path(temp_db),
-                                slang_dict_path=None,
-                                model_name="j-hartmann/emotion-english-distilroberta-base"
-                            )
+                    with patch('emotix_cli.SuicidalIdeationDetector') as mock_detector_class:
+                        with patch('src.preprocess.Preprocessor') as mock_preprocessor_class:
+                            mock_detector = Mock()
+                            mock_detector.process_text.return_value = (False, 0.0, None)
+                            mock_detector_class.return_value = mock_detector
+                            mock_preprocessor = Mock()
+                            mock_preprocessor_class.return_value = mock_preprocessor
+                            with patch('emotix_cli.process_single_entry') as mock_process:
+                                interactive_loop(
+                                    user_id="testuser",
+                                    db_path=Path(temp_db),
+                                    slang_dict_path=None,
+                                    model_name="j-hartmann/emotion-english-distilroberta-base"
+                                )
                             # Empty inputs should not trigger processing
                             mock_process.assert_not_called()
 

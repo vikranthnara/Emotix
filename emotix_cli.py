@@ -8,6 +8,7 @@ import sys
 import argparse
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 import pandas as pd
 import warnings
 
@@ -34,7 +35,8 @@ def process_single_entry(
     model: EmotionModel,
     postprocessor: EmotionPostProcessor,
     suicidal_detector: SuicidalIdeationDetector,
-    slang_dict_path: Path = None
+    slang_dict_path: Path = None,
+    journal_id: Optional[int] = None
 ) -> dict:
     """
     Process a single text entry through the full pipeline.
@@ -48,6 +50,7 @@ def process_single_entry(
         model: EmotionModel instance
         postprocessor: EmotionPostProcessor instance
         slang_dict_path: Path to slang dictionary
+        journal_id: Optional journal ID for journal-specific context
         
     Returns:
         Dictionary with processing results
@@ -68,7 +71,7 @@ def process_single_entry(
         df = preprocessor.preprocess_dataframe(df)
     
     # Step 2: Contextualization
-    df = create_sequences_batch(df, persistence, max_context_turns=3)
+    df = create_sequences_batch(df, persistence, max_context_turns=3, journal_id=journal_id)
     
     # Step 3: Modeling
     df = run_inference_pipeline(df, model)
@@ -101,7 +104,7 @@ def process_single_entry(
     df['FlagForReview'] = is_detected  # Always flag for review if detected
     
     # Step 5: Persistence
-    persistence.write_results(df, archive_raw=True)
+    persistence.write_results(df, archive_raw=True, journal_id=journal_id)
     
     return {
         'text': text,
@@ -128,8 +131,162 @@ def print_welcome():
     print("  'exit' or 'quit' - Exit the program")
     print("  'summary' - Show summary of last 3 entries")
     print("  'history' - Show full history")
+    print("  'journal create' - Create a new journal")
+    print("  'journal list' - List all journals")
+    print("  'journal switch' - Switch to a different journal")
+    print("  'journal remove' - Remove (archive) a journal")
     print("  'help' - Show this help message")
     print("=" * 70 + "\n")
+
+
+def prompt_journal_selection(persistence: MWBPersistence, user_id: str) -> Optional[int]:
+    """
+    Prompt user to select or create a journal.
+    
+    Returns:
+        JournalID of selected journal, or None if user cancels
+    """
+    journals_df = persistence.list_journals(user_id, include_archived=False)
+    
+    if journals_df.empty:
+        print("\n📔 No journals found. You need to create a journal first.")
+        response = input("Create a new journal? (y/n): ").strip().lower()
+        if response == 'y':
+            return create_journal_interactive(persistence, user_id)
+        else:
+            print("❌ Cannot proceed without a journal. Exiting.")
+            return None
+    
+    print("\n📔 Available Journals:")
+    for idx, row in journals_df.iterrows():
+        journal_name = row['JournalName']
+        entry_count = row['EntryCount']
+        print(f"  {idx + 1}. {journal_name} ({entry_count} entries)")
+    
+    print(f"  {len(journals_df) + 1}. Create new journal")
+    print(f"  {len(journals_df) + 2}. Cancel")
+    
+    while True:
+        try:
+            choice = input(f"\nSelect journal (1-{len(journals_df) + 2}): ").strip()
+            choice_num = int(choice)
+            
+            if 1 <= choice_num <= len(journals_df):
+                selected_journal = journals_df.iloc[choice_num - 1]
+                journal_id = selected_journal['JournalID']
+                journal_name = selected_journal['JournalName']
+                print(f"✓ Selected journal: {journal_name}")
+                return journal_id
+            elif choice_num == len(journals_df) + 1:
+                return create_journal_interactive(persistence, user_id)
+            elif choice_num == len(journals_df) + 2:
+                print("❌ Cancelled.")
+                return None
+            else:
+                print(f"❌ Invalid choice. Please enter a number between 1 and {len(journals_df) + 2}.")
+        except ValueError:
+            print("❌ Invalid input. Please enter a number.")
+        except KeyboardInterrupt:
+            print("\n❌ Cancelled.")
+            return None
+
+
+def create_journal_interactive(persistence: MWBPersistence, user_id: str) -> Optional[int]:
+    """Create a new journal interactively."""
+    while True:
+        journal_name = input("\nEnter journal name: ").strip()
+        if not journal_name:
+            print("❌ Journal name cannot be empty.")
+            continue
+        
+        try:
+            journal_id = persistence.create_journal(user_id, journal_name)
+            print(f"✓ Created journal: {journal_name} (ID: {journal_id})")
+            return journal_id
+        except ValueError as e:
+            print(f"❌ Error: {e}")
+            retry = input("Try again? (y/n): ").strip().lower()
+            if retry != 'y':
+                return None
+        except KeyboardInterrupt:
+            print("\n❌ Cancelled.")
+            return None
+
+
+def list_journals_interactive(persistence: MWBPersistence, user_id: str) -> None:
+    """Display list of user's journals."""
+    journals_df = persistence.list_journals(user_id, include_archived=False)
+    
+    if journals_df.empty:
+        print("\n📔 No journals found.")
+        return
+    
+    print("\n📔 Your Journals:")
+    for idx, row in journals_df.iterrows():
+        journal_name = row['JournalName']
+        entry_count = row['EntryCount']
+        created_at = row['CreatedAt']
+        if isinstance(created_at, pd.Timestamp):
+            created_str = created_at.strftime('%Y-%m-%d')
+        else:
+            created_str = str(created_at)
+        print(f"  • {journal_name} - {entry_count} entries (created: {created_str})")
+    print()
+
+
+def switch_journal_interactive(persistence: MWBPersistence, user_id: str) -> Optional[int]:
+    """Switch to a different journal."""
+    return prompt_journal_selection(persistence, user_id)
+
+
+def remove_journal_interactive(persistence: MWBPersistence, user_id: str) -> None:
+    """Remove (archive) a journal."""
+    journals_df = persistence.list_journals(user_id, include_archived=False)
+    
+    if journals_df.empty:
+        print("\n📔 No journals to remove.")
+        return
+    
+    print("\n📔 Select journal to remove:")
+    for idx, row in journals_df.iterrows():
+        journal_name = row['JournalName']
+        entry_count = row['EntryCount']
+        print(f"  {idx + 1}. {journal_name} ({entry_count} entries)")
+    print(f"  {len(journals_df) + 1}. Cancel")
+    
+    while True:
+        try:
+            choice = input(f"\nSelect journal to remove (1-{len(journals_df) + 1}): ").strip()
+            choice_num = int(choice)
+            
+            if 1 <= choice_num <= len(journals_df):
+                selected_journal = journals_df.iloc[choice_num - 1]
+                journal_name = selected_journal['JournalName']
+                entry_count = selected_journal['EntryCount']
+                
+                print(f"\n⚠️  Warning: This will archive '{journal_name}' ({entry_count} entries).")
+                print("   Entries will be preserved but the journal will be hidden.")
+                confirm = input("Are you sure? (yes/no): ").strip().lower()
+                
+                if confirm == 'yes':
+                    success = persistence.archive_journal(user_id, journal_name)
+                    if success:
+                        print(f"✓ Archived journal: {journal_name}")
+                    else:
+                        print(f"❌ Failed to archive journal: {journal_name}")
+                else:
+                    print("❌ Cancelled.")
+                return
+            elif choice_num == len(journals_df) + 1:
+                print("❌ Cancelled.")
+                return
+            else:
+                print(f"❌ Invalid choice. Please enter a number between 1 and {len(journals_df) + 1}.")
+        except ValueError:
+            print("❌ Invalid input. Please enter a number.")
+        except KeyboardInterrupt:
+            print("\n❌ Cancelled.")
+            return
 
 
 def print_result(result: dict):
@@ -165,6 +322,17 @@ def interactive_loop(
     print(f"\nInitializing pipeline components...")
     persistence = MWBPersistence(db_path)
     
+    # Journal selection at startup
+    journal_id = prompt_journal_selection(persistence, user_id)
+    if journal_id is None:
+        print("❌ Cannot proceed without a journal. Exiting.")
+        return
+    
+    # Get journal name for display
+    journals_df = persistence.list_journals(user_id, include_archived=False)
+    current_journal = journals_df[journals_df['JournalID'] == journal_id]
+    journal_name = current_journal['JournalName'].iloc[0] if not current_journal.empty else "Unknown"
+    
     from src.preprocess import Preprocessor
     preprocessor = Preprocessor(slang_dict_path=slang_dict_path)
     
@@ -180,8 +348,8 @@ def interactive_loop(
     try:
         while True:
             try:
-                # Get user input
-                user_input = input(f"[{user_id}] > ").strip()
+                # Get user input with journal name in prompt
+                user_input = input(f"[{user_id}@{journal_name}] > ").strip()
                 
                 if not user_input:
                     continue
@@ -192,12 +360,12 @@ def interactive_loop(
                     break
                 
                 elif user_input.lower() == 'summary':
-                    summary = persistence.get_last_3_summary(user_id)
+                    summary = persistence.get_last_3_summary(user_id, journal_id=journal_id)
                     print(f"\n📊 Last 3 Entries Summary:\n{summary}\n")
                     continue
                 
                 elif user_input.lower() == 'history':
-                    history = persistence.fetch_history(user_id, limit=20)
+                    history = persistence.fetch_history(user_id, journal_id=journal_id, limit=20)
                     if history.empty:
                         print("\n📝 No history found.\n")
                     else:
@@ -217,6 +385,45 @@ def interactive_loop(
                     print_welcome()
                     continue
                 
+                # Journal management commands
+                elif user_input.lower().startswith('journal create'):
+                    new_journal_id = create_journal_interactive(persistence, user_id)
+                    if new_journal_id:
+                        journal_id = new_journal_id
+                        journals_df = persistence.list_journals(user_id, include_archived=False)
+                        current_journal = journals_df[journals_df['JournalID'] == journal_id]
+                        journal_name = current_journal['JournalName'].iloc[0] if not current_journal.empty else "Unknown"
+                        print(f"✓ Switched to journal: {journal_name}")
+                    continue
+                
+                elif user_input.lower() == 'journal list':
+                    list_journals_interactive(persistence, user_id)
+                    continue
+                
+                elif user_input.lower() == 'journal switch':
+                    new_journal_id = switch_journal_interactive(persistence, user_id)
+                    if new_journal_id:
+                        journal_id = new_journal_id
+                        journals_df = persistence.list_journals(user_id, include_archived=False)
+                        current_journal = journals_df[journals_df['JournalID'] == journal_id]
+                        journal_name = current_journal['JournalName'].iloc[0] if not current_journal.empty else "Unknown"
+                        print(f"✓ Switched to journal: {journal_name}")
+                    continue
+                
+                elif user_input.lower() == 'journal remove':
+                    remove_journal_interactive(persistence, user_id)
+                    # Refresh journal list in case current journal was removed
+                    journals_df = persistence.list_journals(user_id, include_archived=False)
+                    if journal_id not in journals_df['JournalID'].values:
+                        # Current journal was removed, prompt for new selection
+                        journal_id = prompt_journal_selection(persistence, user_id)
+                        if journal_id is None:
+                            print("❌ Cannot proceed without a journal. Exiting.")
+                            break
+                        current_journal = journals_df[journals_df['JournalID'] == journal_id]
+                        journal_name = current_journal['JournalName'].iloc[0] if not current_journal.empty else "Unknown"
+                    continue
+                
                 # Process entry
                 timestamp = datetime.now()
                 result = process_single_entry(
@@ -228,13 +435,14 @@ def interactive_loop(
                     model=model,
                     postprocessor=postprocessor,
                     suicidal_detector=suicidal_detector,
-                    slang_dict_path=slang_dict_path
+                    slang_dict_path=slang_dict_path,
+                    journal_id=journal_id
                 )
                 
                 print_result(result)
                 
                 # Show summary after each entry
-                summary = persistence.get_last_3_summary(user_id)
+                summary = persistence.get_last_3_summary(user_id, journal_id=journal_id)
                 print(f"\n📊 Last 3 Entries:\n{summary}\n")
                 
             except KeyboardInterrupt:

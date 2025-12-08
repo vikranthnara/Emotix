@@ -40,11 +40,30 @@ class MWBPersistence:
         try:
             cursor = conn.cursor()
             
+            # Journals table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS journals (
+                    JournalID INTEGER PRIMARY KEY AUTOINCREMENT,
+                    UserID TEXT NOT NULL,
+                    JournalName TEXT NOT NULL,
+                    CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    IsArchived INTEGER DEFAULT 0,
+                    UNIQUE(UserID, JournalName, IsArchived)
+                )
+            """)
+            
+            # Create index for journals
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_journals_user_archived 
+                ON journals (UserID, IsArchived)
+            """)
+            
             # MWB Log table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS mwb_log (
                     LogID INTEGER PRIMARY KEY AUTOINCREMENT,
                     UserID TEXT NOT NULL,
+                    JournalID INTEGER,
                     Timestamp DATETIME NOT NULL,
                     NormalizedText TEXT NOT NULL,
                     PrimaryEmotionLabel TEXT,
@@ -68,6 +87,10 @@ class MWBPersistence:
             
             # Create indexes for mwb_log
             cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_journal_timestamp 
+                ON mwb_log (UserID, JournalID, Timestamp)
+            """)
+            cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_timestamp 
                 ON mwb_log (UserID, Timestamp)
             """)
@@ -81,6 +104,7 @@ class MWBPersistence:
                 CREATE TABLE IF NOT EXISTS raw_archive (
                     ArchiveID INTEGER PRIMARY KEY AUTOINCREMENT,
                     UserID TEXT NOT NULL,
+                    JournalID INTEGER,
                     Timestamp DATETIME NOT NULL,
                     RawText TEXT NOT NULL,
                     Metadata TEXT,
@@ -89,6 +113,10 @@ class MWBPersistence:
             """)
             
             # Create index for raw_archive
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_archive_user_journal_timestamp 
+                ON raw_archive (UserID, JournalID, Timestamp)
+            """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_archive_user_timestamp 
                 ON raw_archive (UserID, Timestamp)
@@ -161,12 +189,31 @@ class MWBPersistence:
                     ADD COLUMN SuicidalIdeationFlag INTEGER DEFAULT 0
                 """)
                 logger.info("Added SuicidalIdeationFlag column to mwb_log")
+            
+            if 'JournalID' not in columns:
+                cursor.execute("""
+                    ALTER TABLE mwb_log 
+                    ADD COLUMN JournalID INTEGER
+                """)
+                logger.info("Added JournalID column to mwb_log")
+            
+            # Check raw_archive columns
+            cursor.execute("PRAGMA table_info(raw_archive)")
+            archive_columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'JournalID' not in archive_columns:
+                cursor.execute("""
+                    ALTER TABLE raw_archive 
+                    ADD COLUMN JournalID INTEGER
+                """)
+                logger.info("Added JournalID column to raw_archive")
         except Exception as e:
             logger.warning(f"Schema migration warning (may be expected for new tables): {e}")
     
     def write_results(self, df: pd.DataFrame, 
                      archive_raw: bool = True,
-                     batch_size: int = 100) -> int:
+                     batch_size: int = 100,
+                     journal_id: Optional[int] = None) -> int:
         """
         Write preprocessed results to SQLite with transaction safety.
         
@@ -205,10 +252,11 @@ class MWBPersistence:
                         if archive_raw and 'Text' in row:
                             cursor.execute("""
                                 INSERT INTO raw_archive 
-                                (UserID, Timestamp, RawText, Metadata)
-                                VALUES (?, ?, ?, ?)
+                                (UserID, JournalID, Timestamp, RawText, Metadata)
+                                VALUES (?, ?, ?, ?, ?)
                             """, (
                                 str(row['UserID']),
+                                journal_id,
                                 timestamp_str,
                                 str(row['Text']),
                                 json.dumps(row.get('Metadata', {}))
@@ -221,15 +269,16 @@ class MWBPersistence:
                         
                         cursor.execute("""
                             INSERT INTO mwb_log 
-                            (UserID, Timestamp, NormalizedText, 
+                            (UserID, JournalID, Timestamp, NormalizedText, 
                              PrimaryEmotionLabel, IntensityScore_Primary,
                              OriginalEmotionLabel, OriginalIntensityScore,
                              AmbiguityFlag, NormalizationFlags,
                              PostProcessingOverride, FlagForReview,
                              PostProcessingReviewFlag, AnomalyDetectionFlag, HighConfidenceFlag, SuicidalIdeationFlag)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             str(row['UserID']),
+                            journal_id,
                             timestamp_str,
                             str(row['NormalizedText']),
                             row.get('PrimaryEmotionLabel'),
@@ -264,6 +313,7 @@ class MWBPersistence:
     
     def fetch_history(self, 
                      user_id: str,
+                     journal_id: Optional[int] = None,
                      since_timestamp: Optional[datetime] = None,
                      limit: Optional[int] = None) -> pd.DataFrame:
         """
@@ -272,6 +322,7 @@ class MWBPersistence:
         
         Args:
             user_id: User identifier
+            journal_id: Optional journal ID to filter by journal
             since_timestamp: Optional datetime to filter history
             limit: Optional limit on number of records
             
@@ -282,7 +333,7 @@ class MWBPersistence:
         
         try:
             query = """
-                SELECT LogID, UserID, Timestamp, NormalizedText,
+                SELECT LogID, UserID, JournalID, Timestamp, NormalizedText,
                        PrimaryEmotionLabel, IntensityScore_Primary,
                        OriginalEmotionLabel, OriginalIntensityScore,
                        AmbiguityFlag, NormalizationFlags,
@@ -292,6 +343,11 @@ class MWBPersistence:
                 WHERE UserID = ?
             """
             params = [str(user_id)]
+            
+            # Filter by journal if provided
+            if journal_id is not None:
+                query += " AND JournalID = ?"
+                params.append(journal_id)
             
             if since_timestamp:
                 query += " AND Timestamp >= ?"
@@ -329,14 +385,14 @@ class MWBPersistence:
         finally:
             conn.close()
     
-    def get_user_stats(self, user_id: str) -> Dict:
-        """Get statistics for a user."""
+    def get_user_stats(self, user_id: str, journal_id: Optional[int] = None) -> Dict:
+        """Get statistics for a user, optionally filtered by journal."""
         conn = self._get_connection()
         
         try:
             cursor = conn.cursor()
             
-            cursor.execute("""
+            query = """
                 SELECT 
                     COUNT(*) as total_logs,
                     MIN(Timestamp) as first_log,
@@ -344,7 +400,14 @@ class MWBPersistence:
                     AVG(IntensityScore_Primary) as avg_intensity
                 FROM mwb_log
                 WHERE UserID = ?
-            """, (str(user_id),))
+            """
+            params = [str(user_id)]
+            
+            if journal_id is not None:
+                query += " AND JournalID = ?"
+                params.append(journal_id)
+            
+            cursor.execute(query, tuple(params))
             
             row = cursor.fetchone()
             return {
@@ -357,12 +420,13 @@ class MWBPersistence:
         finally:
             conn.close()
     
-    def get_last_3_summary(self, user_id: str) -> str:
+    def get_last_3_summary(self, user_id: str, journal_id: Optional[int] = None) -> str:
         """
         Return a formatted summary of the last 3 entries with their tags.
         
         Args:
             user_id: User identifier
+            journal_id: Optional journal ID to filter by journal
             
         Returns:
             Formatted string with last 3 entries, one per line.
@@ -370,7 +434,7 @@ class MWBPersistence:
             Returns "No entries found." if user has no history.
         """
         # Fetch more entries than needed, then take the last 3 (most recent)
-        history = self.fetch_history(user_id, limit=10)
+        history = self.fetch_history(user_id, journal_id=journal_id, limit=10)
         
         if history.empty:
             return "No entries found."
@@ -408,6 +472,178 @@ class MWBPersistence:
             lines.append(f"[{ts_str}] {text} → {emotion}{sentiment_str} ({intensity_str})")
         
         return "\n".join(lines)
+    
+    def create_journal(self, user_id: str, journal_name: str) -> int:
+        """
+        Create a new journal for a user.
+        
+        Args:
+            user_id: User identifier
+            journal_name: Name of the journal (must be unique per user, case-insensitive)
+            
+        Returns:
+            JournalID of the created journal
+            
+        Raises:
+            ValueError: If journal name already exists for user
+        """
+        conn = self._get_connection()
+        
+        try:
+            cursor = conn.cursor()
+            
+            # Check if journal with same name already exists (case-insensitive, not archived)
+            cursor.execute("""
+                SELECT JournalID FROM journals
+                WHERE UserID = ? AND LOWER(JournalName) = LOWER(?) AND IsArchived = 0
+            """, (str(user_id), journal_name.strip()))
+            
+            existing = cursor.fetchone()
+            if existing:
+                raise ValueError(f"Journal '{journal_name}' already exists for user {user_id}")
+            
+            # Create new journal
+            cursor.execute("""
+                INSERT INTO journals (UserID, JournalName, IsArchived)
+                VALUES (?, ?, 0)
+            """, (str(user_id), journal_name.strip()))
+            
+            journal_id = cursor.lastrowid
+            conn.commit()
+            
+            logger.info(f"Created journal '{journal_name}' (ID: {journal_id}) for user {user_id}")
+            return journal_id
+            
+        finally:
+            conn.close()
+    
+    def list_journals(self, user_id: str, include_archived: bool = False) -> pd.DataFrame:
+        """
+        List all journals for a user.
+        
+        Args:
+            user_id: User identifier
+            include_archived: If True, include archived journals
+            
+        Returns:
+            DataFrame with columns: JournalID, JournalName, CreatedAt, IsArchived, EntryCount
+        """
+        conn = self._get_connection()
+        
+        try:
+            query = """
+                SELECT 
+                    j.JournalID,
+                    j.JournalName,
+                    j.CreatedAt,
+                    j.IsArchived,
+                    COUNT(l.LogID) as EntryCount
+                FROM journals j
+                LEFT JOIN mwb_log l ON j.JournalID = l.JournalID
+                WHERE j.UserID = ?
+            """
+            params = [str(user_id)]
+            
+            if not include_archived:
+                query += " AND j.IsArchived = 0"
+            
+            query += " GROUP BY j.JournalID, j.JournalName, j.CreatedAt, j.IsArchived"
+            query += " ORDER BY j.CreatedAt DESC"
+            
+            df = pd.read_sql_query(query, conn, params=params)
+            
+            # Convert CreatedAt to datetime
+            if 'CreatedAt' in df.columns and len(df) > 0:
+                df['CreatedAt'] = pd.to_datetime(df['CreatedAt'], errors='coerce')
+            
+            logger.info(f"Found {len(df)} journals for user {user_id}")
+            return df
+            
+        finally:
+            conn.close()
+    
+    def archive_journal(self, user_id: str, journal_name: str) -> bool:
+        """
+        Soft delete (archive) a journal.
+        
+        Args:
+            user_id: User identifier
+            journal_name: Name of the journal to archive
+            
+        Returns:
+            True if journal was archived, False if not found
+        """
+        conn = self._get_connection()
+        
+        try:
+            cursor = conn.cursor()
+            
+            # Find journal (case-insensitive)
+            cursor.execute("""
+                SELECT JournalID FROM journals
+                WHERE UserID = ? AND LOWER(JournalName) = LOWER(?) AND IsArchived = 0
+            """, (str(user_id), journal_name.strip()))
+            
+            journal = cursor.fetchone()
+            if not journal:
+                logger.warning(f"Journal '{journal_name}' not found for user {user_id}")
+                return False
+            
+            # Archive the journal
+            cursor.execute("""
+                UPDATE journals
+                SET IsArchived = 1
+                WHERE JournalID = ?
+            """, (journal['JournalID'],))
+            
+            conn.commit()
+            
+            logger.info(f"Archived journal '{journal_name}' (ID: {journal['JournalID']}) for user {user_id}")
+            return True
+            
+        finally:
+            conn.close()
+    
+    def get_journal_id(self, user_id: str, journal_name: str) -> Optional[int]:
+        """
+        Get JournalID for a given user and journal name.
+        
+        Args:
+            user_id: User identifier
+            journal_name: Name of the journal (case-insensitive)
+            
+        Returns:
+            JournalID if found, None otherwise
+        """
+        conn = self._get_connection()
+        
+        try:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT JournalID FROM journals
+                WHERE UserID = ? AND LOWER(JournalName) = LOWER(?) AND IsArchived = 0
+            """, (str(user_id), journal_name.strip()))
+            
+            result = cursor.fetchone()
+            return result['JournalID'] if result else None
+            
+        finally:
+            conn.close()
+    
+    def get_active_journal_id(self, user_id: str, journal_name: str) -> Optional[int]:
+        """
+        Get JournalID for an active (non-archived) journal.
+        Alias for get_journal_id (already filters by IsArchived=0).
+        
+        Args:
+            user_id: User identifier
+            journal_name: Name of the journal (case-insensitive)
+            
+        Returns:
+            JournalID if found and active, None otherwise
+        """
+        return self.get_journal_id(user_id, journal_name)
     
     def clear_all_data(self) -> Dict[str, int]:
         """

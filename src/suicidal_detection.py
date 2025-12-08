@@ -16,14 +16,17 @@ class SuicidalIdeationDetector:
     
     # Direct suicidal statements (highest priority - catch all variations)
     DIRECT_PATTERNS = [
+        # Abbreviations first (before full phrases)
+        r'\b(kms|k\s*m\s*s)\b',  # "kms" = "kill myself"
         # Want/wish/hope to die variations (including common typos)
-        r'\b(want|wanna|wana|wan|wishing|hoping|need|should|have\s+to|must)\s+(to\s+)?(die|kill\s+myself|end\s+it|end\s+my\s+life|end\s+everything|end\s+it\s+all|off\s+myself|offing\s+myself)\b',
+        # Note: "kill my self" (with space) is handled by making "myself" optional space
+        r'\b(want|wanna|wana|wan|wishing|hoping|need|should|have\s+to|must)\s+(to\s+)?(die|kill\s+my\s*self|kill\s+myself|end\s+it|end\s+my\s+life|end\s+everything|end\s+it\s+all|off\s+myself|offing\s+myself)\b',
         # Going to/planning to variations
-        r'\b(going\s+to|planning\s+to|gonna|will|\'ll|am\s+going\s+to|\'m\s+going\s+to)\s+(kill\s+myself|end\s+it|end\s+my\s+life|end\s+everything|die|commit\s+suicide|take\s+my\s+life|off\s+myself)\b',
+        r'\b(going\s+to|planning\s+to|gonna|will|\'ll|am\s+going\s+to|\'m\s+going\s+to)\s+(kill\s+my\s*self|kill\s+myself|end\s+it|end\s+my\s+life|end\s+everything|die|commit\s+suicide|take\s+my\s+life|off\s+myself)\b',
         # Present continuous (in progress)
         r'\b(am|\'m|is|are)\s+(killing\s+myself|ending\s+it|ending\s+my\s+life|ending\s+everything|committing\s+suicide|taking\s+my\s+life|offing\s+myself)\b',
         # Direct statements without helper verbs
-        r'\b(kill\s+myself|end\s+it\s+all|end\s+everything|end\s+my\s+life|off\s+myself|offing\s+myself)\b',
+        r'\b(kill\s+my\s*self|kill\s+myself|end\s+it\s+all|end\s+everything|end\s+my\s+life|off\s+myself|offing\s+myself)\b',
         # Suicide-related terms
         r'\b(commit\s+suicide|take\s+my\s+life|end\s+my\s+life|suicide|suicidal|ending\s+it|ending\s+everything)\b',
         # Not wanting to live
@@ -31,7 +34,7 @@ class SuicidalIdeationDetector:
         # Should/need/have to die
         r'\b(should|need|have\s+to|must|gotta)\s+(just\s+)?(die|kill\s+myself|end\s+it|end\s+my\s+life)\b',
         # Future tense variations
-        r'\b(i\'ll|i\s+will|i\'m\s+gonna|im\s+gonna)\s+(kill\s+myself|end\s+it|end\s+my\s+life|die|commit\s+suicide)\b',
+        r'\b(i\'ll|i\s+will|i\'m\s+gonna|im\s+gonna)\s+(kill\s+my\s*self|kill\s+myself|end\s+it|end\s+my\s+life|die|commit\s+suicide)\b',
     ]
     
     # Indirect suicidal statements (expanded for comprehensive coverage)
@@ -112,6 +115,16 @@ class SuicidalIdeationDetector:
         r'\b(just\s+kill\s+me)\b',  # "Just kill me" (exasperation, but could be real - keep for review)
     ]
     
+    # Negation patterns (positive statements indicating NOT having suicidal thoughts)
+    NEGATION_PATTERNS = [
+        r'\b(not|isn\'t|aren\'t|wasn\'t|weren\'t|don\'t|doesn\'t|didn\'t|won\'t|wouldn\'t|can\'t|couldn\'t)\s+(on\s+my\s+mind|thinking\s+about|going\s+to|planning\s+to|want\s+to|wanna|gonna)',
+        r'\b(no\s+longer|not\s+anymore|anymore|not\s+thinking|not\s+going|not\s+planning|not\s+wanting)',
+        r'\b(suicide|kill\s+myself|kill\s+my\s+self|kms|end\s+my\s+life|die)\s+(isn\'t|aren\'t|wasn\'t|weren\'t|not|no\s+longer|anymore)',
+        r'\b(isn\'t|aren\'t|wasn\'t|weren\'t|not|no\s+longer|anymore)\s+(on\s+my\s+mind|thinking\s+about|going\s+to|planning\s+to)\s+(suicide|kill|die|end)',
+        r'\b(over|past|behind|recovered|recovering|better|improved|healing|healed)\s+(suicide|suicidal|thoughts|thinking)',
+        r'\b(suicide|suicidal|thoughts|thinking)\s+(is|are|was|were)\s+(over|past|behind|gone|done|finished)',
+    ]
+    
     def __init__(self, case_sensitive: bool = False):
         """
         Initialize detector.
@@ -140,7 +153,16 @@ class SuicidalIdeationDetector:
         
         text_lower = text.lower()
         
-        # Check for false positives first
+        # Check for negation patterns FIRST (positive statements about NOT having suicidal thoughts)
+        # These should completely exclude detection
+        for pattern in self.NEGATION_PATTERNS:
+            if re.search(pattern, text_lower, self.flags):
+                # This is a positive statement (e.g., "suicide isn't on my mind anymore")
+                # Do NOT flag as suicidal ideation
+                logger.debug(f"Negation pattern detected, excluding from suicidal ideation detection: {text}")
+                return False, 0.0, None
+        
+        # Check for false positives
         for pattern in self.FALSE_POSITIVE_PATTERNS:
             if re.search(pattern, text_lower, self.flags):
                 # False positive detected - still flag for review but with lower confidence
@@ -214,13 +236,30 @@ class SuicidalIdeationDetector:
         
         # Additional safety: Check for very strong single indicators that might be missed
         # These are high-risk single words/phrases that should always trigger
+        # BUT: Skip if they appear in a negated context (already checked above, but double-check)
         critical_single_indicators = [
-            'suicidal', 'kill myself', 'end my life', 'take my life',
+            'suicidal', 'kill myself', 'kill my self', 'kms', 'end my life', 'take my life',
             'commit suicide', 'ending it all', 'ending everything'
         ]
         for indicator in critical_single_indicators:
             if indicator in text_lower:
-                return True, 0.85, 'critical_indicator'
+                # Double-check: make sure it's not negated
+                # Look for negation words near the indicator
+                indicator_pos = text_lower.find(indicator)
+                if indicator_pos >= 0:
+                    # Check context around the indicator (20 chars before and after)
+                    start = max(0, indicator_pos - 20)
+                    end = min(len(text_lower), indicator_pos + len(indicator) + 20)
+                    context = text_lower[start:end]
+                    
+                    # Check for negation in context
+                    negation_words = ['not', "isn't", "aren't", "wasn't", "weren't", "don't", 
+                                    "doesn't", "didn't", "won't", "wouldn't", "can't", "couldn't",
+                                    "no longer", "not anymore", "anymore", "over", "past", "behind"]
+                    has_negation = any(neg in context for neg in negation_words)
+                    
+                    if not has_negation:
+                        return True, 0.85, 'critical_indicator'
         
         return False, 0.0, None
     

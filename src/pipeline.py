@@ -29,7 +29,8 @@ def run_full_pipeline(
     batch_size: int = 32,
     checkpoint_dir: Optional[Union[str, Path]] = None,
     archive_raw: bool = True,
-    temperature: float = 1.5
+    temperature: float = 1.5,
+    journal_id: Optional[int] = None
 ) -> pd.DataFrame:
     """
     Run complete Phase 2 pipeline end-to-end.
@@ -46,6 +47,7 @@ def run_full_pipeline(
         temperature: Temperature scaling for confidence calibration (default: 1.5)
                     Higher values (>1.0) reduce confidence, lower values (<1.0) increase confidence
                     Increased from 1.3 to 1.5 to further reduce overconfidence
+        journal_id: Optional journal ID to filter context and store entries
         
     Returns:
         Final DataFrame with all predictions
@@ -85,7 +87,8 @@ def run_full_pipeline(
     df = create_sequences_batch(
         df,
         persistence,
-        max_context_turns=max_context_turns
+        max_context_turns=max_context_turns,
+        journal_id=journal_id
     )
     
     if checkpoint_dir:
@@ -211,7 +214,7 @@ def run_full_pipeline(
         df['FlagForReview'] = False
         logger.warning("FlagForReview column missing, setting to False")
     
-    rows_written = persistence.write_results(df, archive_raw=archive_raw)
+    rows_written = persistence.write_results(df, archive_raw=archive_raw, journal_id=journal_id)
     logger.info(f"Pipeline complete. Wrote {rows_written} rows to database.")
     
     return df

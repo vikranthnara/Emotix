@@ -81,7 +81,8 @@ def create_sequence_for_model(utterance: str,
 def create_sequences_batch(df: pd.DataFrame,
                           persistence,
                           max_context_turns: int = 5,
-                          sep_token: str = "[SEP]") -> pd.DataFrame:
+                          sep_token: str = "[SEP]",
+                          journal_id: Optional[int] = None) -> pd.DataFrame:
     """
     Create sequences for a batch of utterances with their context.
     
@@ -90,6 +91,7 @@ def create_sequences_batch(df: pd.DataFrame,
         persistence: MWBPersistence instance for history retrieval
         max_context_turns: Maximum number of previous turns to include
         sep_token: Separator token
+        journal_id: Optional journal ID to filter context by journal
         
     Returns:
         DataFrame with added 'Sequence' column
@@ -131,11 +133,12 @@ def create_sequences_batch(df: pd.DataFrame,
     
     # Batch fetch user histories to avoid N+1 query problem
     unique_users = df['UserID'].unique()
-    logger.info(f"Batch fetching histories for {len(unique_users)} unique users")
+    logger.info(f"Batch fetching histories for {len(unique_users)} unique users (journal_id={journal_id})")
     user_histories = {}
     for user_id in unique_users:
         user_histories[user_id] = persistence.fetch_history(
             user_id,
+            journal_id=journal_id,  # Filter by journal for context isolation
             limit=max_context_turns * 2  # Fetch more to filter by timestamp
         )
     logger.info(f"Fetched histories for {len(user_histories)} users")

@@ -80,6 +80,7 @@ normalized, flags = preprocessor.preprocess_text("lol that's great 😊")
 
 **Key Features**:
 - **History Retrieval**: Fast indexed queries (<100ms) to fetch previous user entries from database
+- **Journal Isolation**: Context retrieval can be filtered by `JournalID` to maintain separate context per journal
 - **Context Selection Strategies**:
   - **RecentContextStrategy**: Most recent N turns (default)
   - **SameDayContextStrategy**: Only same-day context (good for journaling)
@@ -101,8 +102,10 @@ from src.contextualize import create_sequences_batch
 from src.persistence import MWBPersistence
 
 persistence = MWBPersistence("data/mwb_log.db")
-df = create_sequences_batch(df, persistence, max_context_turns=5)
+# Create sequences with journal-specific context
+df = create_sequences_batch(df, persistence, max_context_turns=5, journal_id=1)
 # Adds 'Sequence' column with context-aware formatted text
+# Context only includes entries from the specified journal
 ```
 
 ### Layer 4: Modeling
@@ -137,8 +140,12 @@ df = run_inference_pipeline(df, model)
 - **Two-Tier Architecture**:
   - `raw_archive`: Immutable audit trail of original input (data lake pattern)
   - `mwb_log`: Structured, indexed results for fast queries
+- **Multi-Journal Support**: 
+  - `journals` table for journal metadata
+  - `JournalID` column in both `mwb_log` and `raw_archive` for journal association
+  - Composite indexes on `(UserID, JournalID, Timestamp)` for journal-specific queries
 - **ACID Transactions**: Batch writes with rollback on errors
-- **Fast Queries**: Composite index on `(UserID, Timestamp)` enables <100ms history retrieval
+- **Fast Queries**: Composite indexes enable <100ms history retrieval (per journal or globally)
 - **Schema Migration**: Automatic schema evolution without data loss
 - **Comprehensive Schema**: Stores original predictions, post-processed results, flags, and metadata
 
@@ -265,6 +272,135 @@ sequence = "I'm fine [SEP] I'm feeling terrible today Nothing is working for me"
 - **Context Window**: Configurable (default: 5 turns) to balance accuracy and performance
 
 This context-aware design significantly improves emotion classification accuracy, especially for ambiguous or context-dependent expressions common in mental well-being tracking.
+
+## Multi-Journal Support
+
+### Overview
+
+The Emotix pipeline supports **multiple journals per user**, allowing users to maintain separate, isolated journals for different purposes (e.g., "Work Journal", "Personal Journal", "Therapy Journal"). Each journal maintains its own context history, ensuring that entries in one journal don't affect emotion classification in another.
+
+### Key Features
+
+- **Journal Isolation**: Context is isolated per journal - entries in one journal only use context from that same journal
+- **Multiple Journals Per User**: Users can create and manage multiple named journals
+- **Journal Management**: Create, list, switch between, and archive journals
+- **Context-Aware Per Journal**: Each journal maintains its own conversation history for context-aware emotion classification
+- **Soft Deletion**: Journals can be archived (soft-deleted) while preserving all entries
+
+### How It Works
+
+**Database Schema**:
+- `journals` table stores journal metadata (JournalID, UserID, JournalName, IsArchived)
+- `mwb_log` and `raw_archive` tables include `JournalID` column to associate entries with journals
+- Composite indexes on `(UserID, JournalID, Timestamp)` enable fast journal-specific queries
+
+**Context Isolation**:
+- When processing an entry, the system only retrieves history from the same journal
+- This ensures that "I'm fine" in a work journal doesn't use context from a personal journal
+- Each journal maintains independent emotion tracking and patterns
+
+**Journal Operations**:
+- **Create**: Create a new journal with a unique name (case-insensitive)
+- **List**: View all active journals with entry counts
+- **Switch**: Change the active journal for new entries
+- **Archive**: Soft-delete a journal (entries preserved, journal hidden)
+
+### Usage
+
+**CLI Usage with Journal Commands**:
+
+```bash
+python emotix_cli.py --user user001
+```
+
+Once in the CLI:
+```
+[user001@My Journal] > journal create
+Enter journal name: Work Journal
+✓ Created journal: Work Journal (ID: 1)
+
+[user001@Work Journal] > I had a great meeting today
+✓ Processed: I had a great meeting today
+  Emotion: joy (intensity: 0.85)
+
+[user001@Work Journal] > journal switch
+📔 Available Journals:
+  1. Work Journal (1 entries)
+  2. Create new journal
+  3. Cancel
+Select journal (1-3): 2
+Enter journal name: Personal Journal
+✓ Created journal: Personal Journal (ID: 2)
+✓ Switched to journal: Personal Journal
+
+[user001@Personal Journal] > Feeling stressed about family
+✓ Processed: Feeling stressed about family
+  Emotion: fear (intensity: 0.72)
+```
+
+**Programmatic Usage**:
+
+```python
+from src.persistence import MWBPersistence
+
+persistence = MWBPersistence("data/mwb_log.db")
+
+# Create a new journal
+journal_id = persistence.create_journal("user001", "Work Journal")
+print(f"Created journal with ID: {journal_id}")
+
+# List all journals for a user
+journals_df = persistence.list_journals("user001")
+print(journals_df)
+# Output:
+#    JournalID  JournalName  CreatedAt  IsArchived  EntryCount
+# 0          1  Work Journal  2024-01-15           0          5
+# 1          2  Personal Journal  2024-01-15           0          3
+
+# Get journal ID by name
+journal_id = persistence.get_journal_id("user001", "Work Journal")
+
+# Fetch history for a specific journal
+history = persistence.fetch_history("user001", journal_id=journal_id, limit=10)
+
+# Get summary for a specific journal
+summary = persistence.get_last_3_summary("user001", journal_id=journal_id)
+
+# Write results to a specific journal
+from src.pipeline import run_full_pipeline
+
+df_results = run_full_pipeline(
+    input_path="data/sample_data.csv",
+    db_path="data/mwb_log.db",
+    journal_id=journal_id  # Associate entries with specific journal
+)
+```
+
+**Pipeline Integration**:
+
+The journal feature is integrated throughout the pipeline:
+- **Contextualization**: `create_sequences_batch()` accepts `journal_id` parameter to filter context
+- **Persistence**: `write_results()` accepts `journal_id` to associate entries with journals
+- **History Retrieval**: `fetch_history()` filters by journal when `journal_id` is provided
+- **Statistics**: `get_user_stats()` can filter statistics by journal
+
+### Benefits
+
+1. **Privacy**: Separate journals allow users to keep different aspects of their life separate
+2. **Organization**: Users can organize entries by topic, purpose, or time period
+3. **Context Accuracy**: Journal isolation ensures context-aware classification uses relevant history
+4. **Flexibility**: Users can create as many journals as needed and switch between them easily
+5. **Data Preservation**: Archived journals preserve all entries for future analysis
+
+### Example Use Cases
+
+- **Work vs Personal**: Separate work-related stress from personal emotions
+- **Therapy Journal**: Maintain a dedicated journal for therapy sessions
+- **Daily Reflection**: Create a new journal each month for monthly reviews
+- **Project-Specific**: Track emotions related to specific projects or life events
+- **Family Journal**: Separate family-related entries from individual entries
+
+The multi-journal feature enhances the pipeline's flexibility and makes it suitable for diverse mental well-being tracking scenarios.
 
 ## Suicidal Ideation Detection
 
@@ -413,6 +549,10 @@ The CLI processes text entries through the full pipeline and displays emotion pr
 - Type any text and press Enter to process it
 - `summary` - Show summary of last 3 entries
 - `history` - Show full history (last 10 entries)
+- `journal create` - Create a new journal
+- `journal list` - List all your journals
+- `journal switch` - Switch to a different journal
+- `journal remove` - Archive (remove) a journal
 - `exit` or `quit` - Exit the program
 
 ### Programmatic Usage
@@ -420,13 +560,20 @@ The CLI processes text entries through the full pipeline and displays emotion pr
 **Complete Pipeline:**
 ```python
 from src.pipeline import run_full_pipeline
+from src.persistence import MWBPersistence
 
+# Optional: Create a journal first
+persistence = MWBPersistence("data/mwb_log.db")
+journal_id = persistence.create_journal("user001", "My Journal")
+
+# Run pipeline with journal support
 df_results = run_full_pipeline(
     input_path="data/sample_data.csv",
     db_path="data/mwb_log.db",
     slang_dict_path="data/slang_dictionary.json",
     model_name="j-hartmann/emotion-english-distilroberta-base",
-    temperature=1.5
+    temperature=1.5,
+    journal_id=journal_id  # Optional: associate entries with journal
 )
 ```
 
@@ -681,6 +828,7 @@ Emotix/
 
 - **Handles Messy Data**: Normalizes slang, emojis, typos, and inconsistent formatting
 - **Context-Aware**: Uses conversation history to improve emotion classification
+- **Multi-Journal Support**: Users can create multiple isolated journals (e.g., "Work", "Personal", "Therapy") with separate context histories
 - **Rule-Based Corrections**: Post-processing corrects common misclassifications
 - **Anomaly Detection**: Identifies high-risk user patterns automatically
 - **Suicidal Ideation Detection**: Real-time detection of crisis indicators with immediate help resources

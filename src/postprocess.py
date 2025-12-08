@@ -29,6 +29,8 @@ class EmotionPostProcessor:
         'sad', 'depressed', 'down', 'upset', 'angry', 'mad',
         'anxious', 'worried', 'stressed', 'overwhelmed',
         'tired', 'exhausted', 'drained', 'hopeless',
+        'hate', 'hates', 'hated', 'hating',  # Added hate variations
+        'mean', 'cruel', 'horrible', 'terrible', 'awful',  # Added mean and related
         '😢', '😭', '😫', '😰', '😨', '😟'
     ]
     
@@ -401,11 +403,30 @@ class EmotionPostProcessor:
                 override_type = 'very_low_confidence_positive'
                 logger.info(f"Override: Very low confidence positive detected. {predicted_label} → joy")
             elif any(keyword in check_text for keyword in self.NEGATIVE_KEYWORDS):
-                corrected_label = 'sadness'
+                # Determine if it's anger or sadness based on keywords
+                anger_keywords = ['hate', 'hates', 'hated', 'hating', 'angry', 'mad', 'furious', 'rage']
+                if any(keyword in check_text for keyword in anger_keywords):
+                    corrected_label = 'anger'
+                else:
+                    corrected_label = 'sadness'
                 corrected_intensity = self.override_confidence
                 was_overridden = True
                 override_type = 'very_low_confidence_negative'
-                logger.info(f"Override: Very low confidence negative detected. {predicted_label} → sadness")
+                logger.info(f"Override: Very low confidence negative detected. {predicted_label} → {corrected_label}")
+        
+        # Rule 5c: Medium-low confidence (0.3-0.6) with strong negative keywords → override neutral to anger/sadness
+        if not was_overridden and 0.3 <= predicted_intensity < 0.6 and predicted_label == 'neutral':
+            if any(keyword in check_text for keyword in self.NEGATIVE_KEYWORDS):
+                # Determine if it's anger or sadness based on keywords
+                anger_keywords = ['hate', 'hates', 'hated', 'hating', 'angry', 'mad', 'furious', 'rage', 'mean']
+                if any(keyword in check_text for keyword in anger_keywords):
+                    corrected_label = 'anger'
+                else:
+                    corrected_label = 'sadness'
+                corrected_intensity = self.override_confidence
+                was_overridden = True
+                override_type = 'neutral_to_negative'
+                logger.info(f"Override: Neutral with negative keywords detected. {predicted_label} → {corrected_label}")
         
         # Rule 6: Anxiety patterns (validate fear predictions)
         if self.check_anxiety(check_text) and not was_overridden:
