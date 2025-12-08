@@ -1,6 +1,6 @@
 # Emotix: Mental Well-Being Tracking Pipeline
 
-A multi-layer NLP pipeline for longitudinal Mental Well-Being (MWB) tracking from raw conversational text. The pipeline processes noisy conversational data through ingestion, preprocessing, contextualization, emotion modeling, and persistence layers.
+A multi-layer NLP pipeline for longitudinal Mental Well-Being tracking from raw conversational text. The pipeline processes noisy conversational data through ingestion, preprocessing, contextualization, emotion modeling, and persistence layers.
 
 ## Architecture Overview
 
